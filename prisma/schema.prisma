@@ -1,0 +1,98 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+
+enum Role {
+  ADMIN
+  MEMBER
+}
+
+enum JoinRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model User {
+  id          String   @id // Firebase UID
+  email       String   @unique
+  customId    String   @unique @map("custom_id") // 8-char unique ID
+  displayName String?  @map("display_name")
+  photoUrl    String?  @map("photo_url")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  ownedGroups      Group[]       @relation("GroupOwner")
+  groupMemberships GroupMember[]
+  userStatuses     UserStatus[]
+  joinRequests     JoinRequest[]
+
+  @@map("users")
+}
+
+model Group {
+  id         String   @id @default(uuid()) @db.Uuid
+  name       String
+  inviteCode String   @unique @map("invite_code")
+  ownerId    String   @map("owner_id")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  // Relations
+  owner        User          @relation("GroupOwner", fields: [ownerId], references: [id])
+  members      GroupMember[]
+  userStatuses UserStatus[]
+  joinRequests JoinRequest[]
+
+  @@map("groups")
+}
+
+model GroupMember {
+  userId  String @map("user_id")
+  groupId String @map("group_id") @db.Uuid
+  role    Role   @default(MEMBER) // OWNER is handled by Group.ownerId relationship logic or explicit Role
+  joinedAt DateTime @default(now())
+
+  // Relations
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  group Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@id([userId, groupId])
+  @@map("group_members")
+}
+
+model UserStatus {
+  userId    String   @map("user_id")
+  groupId   String   @map("group_id") @db.Uuid
+  text      String
+  emoji     String?
+  mood      String?   // New: Mood field
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+
+  // Relations
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  group Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@id([userId, groupId])
+  @@map("user_statuses")
+}
+
+model JoinRequest {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @map("user_id")
+  groupId   String   @map("group_id") @db.Uuid
+  status    JoinRequestStatus @default(PENDING)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  group     Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@map("join_requests")
+}
