@@ -19,12 +19,15 @@ enum JoinRequestStatus {
   REJECTED
 }
 
+// ... (User)
 model User {
   id          String   @id // Firebase UID
   email       String   @unique
-  customId    String   @unique @map("custom_id") // 8-char unique ID
+  customId    String   @unique @map("custom_id")
   displayName String?  @map("display_name")
   photoUrl    String?  @map("photo_url")
+  isPremium   Boolean  @default(false) @map("is_premium") // New
+  subscriptionStatus String? @map("subscription_status") // New: For tracking Adapty/Premium state
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
 
@@ -33,33 +36,37 @@ model User {
   groupMemberships GroupMember[]
   userStatuses     UserStatus[]
   joinRequests     JoinRequest[]
+  notificationSettings NotificationSetting[] // New
 
   @@map("users")
 }
 
 model Group {
-  id         String   @id @default(uuid()) @db.Uuid
-  name       String
-  inviteCode String   @unique @map("invite_code")
-  ownerId    String   @map("owner_id")
-  createdAt  DateTime @default(now()) @map("created_at")
+  id          String   @id @default(uuid()) @db.Uuid
+  name        String
+  description String?  // New
+  inviteCode  String   @unique @map("invite_code")
+  ownerId     String   @map("owner_id")
+  maxMembers  Int      @default(5) @map("max_members") // New
+  createdAt   DateTime @default(now()) @map("created_at")
 
   // Relations
   owner        User          @relation("GroupOwner", fields: [ownerId], references: [id])
   members      GroupMember[]
   userStatuses UserStatus[]
   joinRequests JoinRequest[]
+  customMoods  GroupMood[]   // New
 
   @@map("groups")
 }
 
+// ... (GroupMember same)
 model GroupMember {
   userId  String @map("user_id")
   groupId String @map("group_id") @db.Uuid
-  role    Role   @default(MEMBER) // OWNER is handled by Group.ownerId relationship logic or explicit Role
+  role    Role   @default(MEMBER)
   joinedAt DateTime @default(now())
 
-  // Relations
   user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
   group Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
 
@@ -67,15 +74,15 @@ model GroupMember {
   @@map("group_members")
 }
 
+// ... (UserStatus updated)
 model UserStatus {
   userId    String   @map("user_id")
   groupId   String   @map("group_id") @db.Uuid
   text      String
   emoji     String?
-  mood      String?   // New: Mood field
+  mood      String?
   updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
 
-  // Relations
   user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
   group Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
 
@@ -83,6 +90,7 @@ model UserStatus {
   @@map("user_statuses")
 }
 
+// ... (JoinRequest same)
 model JoinRequest {
   id        String   @id @default(uuid()) @db.Uuid
   userId    String   @map("user_id")
@@ -96,3 +104,35 @@ model JoinRequest {
 
   @@map("join_requests")
 }
+
+// New Models
+
+model GroupMood {
+  id        String   @id @default(uuid()) @db.Uuid
+  groupId   String   @map("group_id") @db.Uuid
+  text      String
+  emoji     String?
+  mood      String   // Technical mood key (e.g. "happy", "busy")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  group     Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@map("group_moods")
+}
+
+model NotificationSetting {
+  userId    String   @map("user_id")
+  groupId   String   @map("group_id") @db.Uuid
+  isMuted   Boolean  @default(false) @map("is_muted") // Mute entire group
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // Group relation is optional or strict? Usually per group.
+  // Logic: User can mute specific group.
+  // We can also add global settings here if needed, but per-group is key.
+
+  @@id([userId, groupId])
+  @@map("notification_settings")
+}
+

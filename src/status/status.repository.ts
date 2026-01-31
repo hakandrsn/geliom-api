@@ -47,4 +47,28 @@ export class StatusRepository {
     });
     return group?.name || null;
   }
+
+  async getGroupNotificationTargets(groupId: string, senderId: string): Promise<string[]> {
+    // 1. Get all members
+    const members = await this.prisma.groupMember.findMany({
+      where: { groupId },
+      select: { userId: true },
+    });
+
+    // 2. Get mute settings
+    const mutedSettings = await this.prisma.notificationSetting.findMany({
+      where: {
+        groupId,
+        isMuted: true,
+      },
+      select: { userId: true },
+    });
+
+    const mutedUserIds = new Set(mutedSettings.map((s) => s.userId));
+
+    // 3. Filter members (exclude sender and muted users)
+    return members
+      .map((m) => m.userId)
+      .filter((userId) => userId !== senderId && !mutedUserIds.has(userId));
+  }
 }

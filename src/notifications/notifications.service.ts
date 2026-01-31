@@ -31,16 +31,22 @@ export class NotificationsService {
     return this.sendToOneSignal(payload);
   }
 
-  async sendNotificationToUser(userId: string, title: string, message: string, data?: any) {
+  async sendNotificationToUsers(userIds: string[], title: string, message: string, data?: any) {
+    if (!userIds.length) return;
+
     const payload = {
       app_id: this.appId,
-      include_external_user_ids: [userId], // Using Firebase UID as external ID
+      include_external_user_ids: userIds,
       headings: { en: title },
       contents: { en: message },
       data,
     };
 
     return this.sendToOneSignal(payload);
+  }
+
+  async sendNotificationToUser(userId: string, title: string, message: string, data?: any) {
+    return this.sendNotificationToUsers([userId], title, message, data);
   }
 
   private async sendToOneSignal(payload: any) {

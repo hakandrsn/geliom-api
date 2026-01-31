@@ -118,4 +118,57 @@ export class GroupsRepository {
       data: { status },
     });
   }
+
+  // Helpers for limits
+  async countUserMemberships(userId: string): Promise<number> {
+    return this.prisma.groupMember.count({
+      where: { userId },
+    });
+  }
+
+  async countMembers(groupId: string): Promise<number> {
+    return this.prisma.groupMember.count({
+      where: { groupId },
+    });
+  }
+
+  // Update Group
+  async update(groupId: string, data: { name?: string; description?: string }) {
+    return this.prisma.group.update({
+      where: { id: groupId },
+      data,
+    });
+  }
+
+  // Custom Moods
+  async createGroupMood(groupId: string, data: { text: string; emoji?: string; mood: string }) {
+    return this.prisma.groupMood.create({
+      data: {
+        groupId,
+        text: data.text,
+        mood: data.mood,
+        emoji: data.emoji ?? null,
+      },
+    });
+  }
+
+  async countGroupMoods(groupId: string): Promise<number> {
+    return this.prisma.groupMood.count({
+      where: { groupId },
+    });
+  }
+
+  async setGroupMuteStatus(userId: string, groupId: string, isMuted: boolean) {
+    return this.prisma.notificationSetting.upsert({
+      where: {
+        userId_groupId: { userId, groupId },
+      },
+      update: { isMuted },
+      create: {
+        userId,
+        groupId,
+        isMuted,
+      },
+    });
+  }
 }

@@ -4,6 +4,7 @@ import { generateUniqueInviteCode } from './helpers/invite-code.generator';
 
 import { UsersService } from '../users/users.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { PREMIUM_LIMITS, ERROR_MESSAGES } from '../common/constants/premium.constants';
 
 @Injectable()
 export class GroupsService {
@@ -14,6 +15,20 @@ export class GroupsService {
   ) {}
 
   async createGroup(userId: string, name: string) {
+    const user = await this.usersService.findById(userId);
+    if (!user) throw new NotFoundException('Kullanıcı bulunamadı');
+
+    const membershipCount = await this.groupsRepository.countUserMemberships(userId);
+    const limit = (user as any).isPremium
+      ? PREMIUM_LIMITS.PREMIUM.MAX_MEMBERSHIPS
+      : PREMIUM_LIMITS.FREE.MAX_MEMBERSHIPS;
+
+    if (membershipCount >= limit) {
+      throw new ConflictException(
+        ERROR_MESSAGES.PREMIUM.MAX_GROUPS_REACHED(membershipCount, limit),
+      );
+    }
+
     const inviteCode = await generateUniqueInviteCode((code) =>
       this.groupsRepository.findByInviteCode(code).then((g) => !!g),
     );
@@ -29,6 +44,34 @@ export class GroupsService {
     const group = await this.groupsRepository.findByInviteCode(inviteCode);
     if (!group) {
       throw new NotFoundException('Grup bulunamadı');
+    }
+
+    // 1. Check User Membership Limit
+    const user = await this.usersService.findById(userId);
+    if (!user) throw new NotFoundException('Kullanıcı bulunamadı');
+
+    const membershipCount = await this.groupsRepository.countUserMemberships(userId);
+    const userLimit = (user as any).isPremium
+      ? PREMIUM_LIMITS.PREMIUM.MAX_MEMBERSHIPS
+      : PREMIUM_LIMITS.FREE.MAX_MEMBERSHIPS;
+
+    if (membershipCount >= userLimit) {
+      throw new ConflictException(
+        ERROR_MESSAGES.PREMIUM.MAX_GROUPS_REACHED(membershipCount, userLimit),
+      );
+    }
+
+    // 2. Check Group Capacity Limit
+    const groupOwner = await this.usersService.findById(group.ownerId);
+    if (!groupOwner) throw new NotFoundException('Grup sahibi bulunamadı');
+
+    const memberCount = await this.groupsRepository.countMembers(group.id);
+    const groupLimit = (groupOwner as any).isPremium
+      ? PREMIUM_LIMITS.PREMIUM.MAX_GROUP_MEMBERS
+      : PREMIUM_LIMITS.FREE.MAX_GROUP_MEMBERS;
+
+    if (memberCount >= groupLimit) {
+      throw new ConflictException(ERROR_MESSAGES.PREMIUM.MAX_MEMBERS_REACHED(groupLimit));
     }
 
     const isMember = await this.groupsRepository.isMember(group.id, userId);
@@ -102,21 +145,88 @@ export class GroupsService {
     if (request.status !== 'PENDING') throw new ConflictException('Bu istek zaten yanıtlanmış');
 
     if (response === 'APPROVED') {
+      // Check Group Capacity
+      const groupToCheck = await this.groupsRepository.findById(groupId);
+      if (!groupToCheck) throw new NotFoundException('Grup bulunamadı');
+
+      const groupOwner = await this.usersService.findById(groupToCheck.ownerId);
+      if (!groupOwner) throw new NotFoundException('Grup sahibi bulunamadı');
+
+      const memberCount = await this.groupsRepository.countMembers(groupId);
+      const limit = (groupOwner as any).isPremium
+        ? PREMIUM_LIMITS.PREMIUM.MAX_GROUP_MEMBERS
+        : PREMIUM_LIMITS.FREE.MAX_GROUP_MEMBERS;
+
+      if (memberCount >= limit) {
+        throw new ConflictException(ERROR_MESSAGES.PREMIUM.MAX_MEMBERS_REACHED(limit));
+      }
+
       // Add member
       await this.groupsRepository.addMember(groupId, request.userId, 'MEMBER');
 
       // Notify User
-      const group = await this.groupsRepository.findById(groupId);
-      if (group) {
+      if (groupToCheck) {
         await this.notificationsService.sendNotificationToUser(
           request.userId,
           'İstek Onaylandı',
-          `${group.name} grubuna katılım isteğiniz onaylandı! 🎉`,
+          `${groupToCheck.name} grubuna katılım isteğiniz onaylandı! 🎉`,
           { type: 'request_approved', groupId },
         );
       }
     }
 
     return this.groupsRepository.updateJoinRequestStatus(requestId, response);
+  }
+
+  async updateGroup(
+    userId: string,
+    groupId: string,
+    data: { name?: string; description?: string },
+  ) {
+    const role = await this.groupsRepository.getMemberRole(groupId, userId);
+    if (role !== 'ADMIN') throw new ConflictException(ERROR_MESSAGES.GROUP.NOT_ADMIN);
+
+    return this.groupsRepository.update(groupId, data);
+  }
+  async addCustomMood(
+    userId: string,
+    groupId: string,
+    data: { text: string; emoji?: string; mood: string },
+  ) {
+    // 1. Verify Admin
+    const role = await this.groupsRepository.getMemberRole(groupId, userId);
+    if (role !== 'ADMIN') throw new ConflictException(ERROR_MESSAGES.GROUP.NOT_ADMIN);
+
+    // 2. Verify Premium Logic
+    const group = await this.groupsRepository.findById(groupId);
+    if (!group) throw new NotFoundException('Grup bulunamadı');
+
+    const owner = await this.usersService.findById(group.ownerId);
+    if (!owner) throw new NotFoundException('Grup sahibi bulunamadı');
+
+    const isPremium = (owner as any).isPremium;
+    const config = isPremium ? PREMIUM_LIMITS.PREMIUM : PREMIUM_LIMITS.FREE;
+
+    if (!config.CAN_ADD_CUSTOM_MOOD) {
+      throw new ConflictException(ERROR_MESSAGES.PREMIUM.CUSTOM_MOOD_RESTRICTED);
+    }
+
+    // 3. Check Count Limit
+    const count = await this.groupsRepository.countGroupMoods(groupId);
+    if (count >= config.MAX_CUSTOM_MOODS) {
+      throw new ConflictException(
+        ERROR_MESSAGES.PREMIUM.MAX_CUSTOM_MOODS_REACHED(config.MAX_CUSTOM_MOODS),
+      );
+    }
+
+    return this.groupsRepository.createGroupMood(groupId, data);
+  }
+
+  async muteGroup(userId: string, groupId: string, isMuted: boolean) {
+    // Upsert notification setting
+    // We need to access prisma directly or add a repo method.
+    // Since we don't have a NotificationRepository, let's use GroupsRepository or quick prisma access if possible.
+    // Better: Add to GroupsRepository.
+    return this.groupsRepository.setGroupMuteStatus(userId, groupId, isMuted);
   }
 }

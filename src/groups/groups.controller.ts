@@ -1,4 +1,4 @@
-import { Controller, Post, Body, Delete, Param, UseGuards, Get } from '@nestjs/common';
+import { Controller, Post, Body, Delete, Param, UseGuards, Get, Patch } from '@nestjs/common';
 import { GroupsService } from './groups.service';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { FirebaseAuthGuard } from '../common/guards/firebase-auth.guard';
@@ -43,5 +43,31 @@ export class GroupsController {
     @Body('response') response: 'APPROVED' | 'REJECTED',
   ) {
     return this.groupsService.respondToRequest(user.id, groupId, requestId, response);
+  }
+  @Patch(':id')
+  async update(
+    @CurrentUser() user: { id: string },
+    @Param('id') groupId: string,
+    @Body('name') name?: string,
+    @Body('description') description?: string,
+  ) {
+    return this.groupsService.updateGroup(user.id, groupId, { name, description });
+  }
+  @Post(':id/moods')
+  async addMood(
+    @CurrentUser() user: { id: string },
+    @Param('id') groupId: string,
+    @Body() data: { text: string; emoji?: string; mood: string },
+  ) {
+    return this.groupsService.addCustomMood(user.id, groupId, data);
+  }
+
+  @Post(':id/mute')
+  async mute(
+    @CurrentUser() user: { id: string },
+    @Param('id') groupId: string,
+    @Body('isMuted') isMuted: boolean,
+  ) {
+    return this.groupsService.muteGroup(user.id, groupId, isMuted);
   }
 }

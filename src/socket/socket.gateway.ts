@@ -7,7 +7,7 @@ import {
 import { Server, Socket } from 'socket.io';
 import { Inject, Injectable } from '@nestjs/common';
 import * as admin from 'firebase-admin';
-import { PrismaService } from '../prisma/prisma.service';
+import { PrismaService } from '@/prisma/prisma.service';
 
 @WebSocketGateway({
   cors: {
@@ -26,7 +26,9 @@ export class SocketGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
   async handleConnection(client: Socket) {
     try {
-      const token = client.handshake.auth?.token;
+      const token =
+        client.handshake.auth?.token ||
+        client.handshake.headers?.token as string;
       if (!token) {
         client.disconnect();
         return;

@@ -24,9 +24,7 @@ export class FirebaseStrategy extends PassportStrategy(Strategy, 'firebase') {
       }
 
       // Sync user (Lazy creation)
-      const user = await this.authService.validateUser(decodedToken);
-
-      return user;
+      return await this.authService.validateUser(decodedToken);
     } catch (error) {
       console.error('Firebase Auth Error:', error);
       throw new UnauthorizedException('Authentication failed');

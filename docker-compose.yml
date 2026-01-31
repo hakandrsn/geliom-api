@@ -26,6 +26,23 @@ services:
       timeout: 3s
       retries: 3
 
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: geliom-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: geliom_local
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
+
 networks:
   default:
     name: geliom-network
