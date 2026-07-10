@@ -1,35 +1,19 @@
-import { IsString, IsBoolean, IsOptional, MaxLength } from 'class-validator';
+import { IsNotEmpty, IsOptional, IsString, MaxLength } from 'class-validator';
+import { Transform } from 'class-transformer';
 import { ApiPropertyOptional } from '@nestjs/swagger';
 
 export class UpdateUserDto {
   @ApiPropertyOptional({ description: 'Display name' })
-  @IsString()
   @IsOptional()
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @IsString()
+  @IsNotEmpty({ message: 'displayName boş olamaz' })
   @MaxLength(100)
   displayName?: string;
 
   @ApiPropertyOptional({ description: 'Profile photo URL' })
-  @IsString()
   @IsOptional()
+  @IsString()
+  @MaxLength(2048)
   photoUrl?: string;
-
-  @ApiPropertyOptional({ description: 'Avatar identifier' })
-  @IsString()
-  @IsOptional()
-  avatar?: string;
-
-  @ApiPropertyOptional({ description: 'Show mood to others' })
-  @IsBoolean()
-  @IsOptional()
-  showMood?: boolean;
-
-  @ApiPropertyOptional({ description: 'Onboarding completed' })
-  @IsBoolean()
-  @IsOptional()
-  hasCompletedOnboarding?: boolean;
-
-  @ApiPropertyOptional({ description: 'OneSignal player ID for push notifications' })
-  @IsString()
-  @IsOptional()
-  onesignalPlayerId?: string;
 }

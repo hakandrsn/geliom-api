@@ -1,23 +1,19 @@
-import { IsString, IsOptional, IsInt, Min, Max, MaxLength } from 'class-validator';
+import { IsNotEmpty, IsOptional, IsString, MaxLength } from 'class-validator';
+import { Transform } from 'class-transformer';
 import { ApiPropertyOptional } from '@nestjs/swagger';
 
 export class UpdateGroupDto {
   @ApiPropertyOptional({ description: 'Group name' })
   @IsOptional()
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
   @IsString()
+  @IsNotEmpty({ message: 'Grup adı boş olamaz' })
   @MaxLength(100)
   name?: string;
 
-  @ApiPropertyOptional({ description: 'Group type' })
+  @ApiPropertyOptional({ description: 'Group description' })
   @IsOptional()
   @IsString()
-  @MaxLength(50)
-  type?: string;
-
-  @ApiPropertyOptional({ description: 'Maximum member count' })
-  @IsOptional()
-  @IsInt()
-  @Min(2)
-  @Max(50)
-  memberLimit?: number;
+  @MaxLength(500)
+  description?: string;
 }

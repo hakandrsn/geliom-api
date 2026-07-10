@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { PinoLogger } from 'nestjs-pino';
 import { UsersService } from '../users/users.service';
-import { User } from '@prisma/client';
+import { UserRecord } from '../firebase/firestore.types';
 import * as admin from 'firebase-admin';
 
 @Injectable()
@@ -16,7 +16,7 @@ export class AuthService {
   /**
    * Firebase token'dan kullanıcıyı doğrula veya oluştur (Lazy Sync)
    */
-  async validateUser(decodedToken: admin.auth.DecodedIdToken): Promise<User> {
+  async validateUser(decodedToken: admin.auth.DecodedIdToken): Promise<UserRecord> {
     const { uid: userId, email, name, picture } = decodedToken;
 
     this.logger.debug({ userId, email }, 'Validating user from Firebase Token');

@@ -13,24 +13,7 @@ export class NotificationsService {
     this.apiKey = this.configService.get<string>('ONESIGNAL_API_KEY') || '';
   }
 
-  async sendNotificationToGroup(groupId: string, title: string, message: string, data?: any) {
-    // In a real scenario, we would map groupId to OneSignal segments or tags.
-    // For simplicity/MVP, we can assume using tags: key: "groupId", relation: "=", value: groupId
-
-    // Note: To target specific users (group members), we'd usually use include_external_user_ids
-    // and fetch member IDs from DB. But let's assume we use Tags for groups here for efficiency.
-
-    const payload = {
-      app_id: this.appId,
-      headings: { en: title },
-      contents: { en: message },
-      filters: [{ field: 'tag', key: 'group_id', relation: '=', value: groupId }],
-      data: { groupId, ...data },
-    };
-
-    return this.sendToOneSignal(payload);
-  }
-
+  /** Hedefleme external user ID (= Firebase UID) ile yapılır — mobil login'de set eder. */
   async sendNotificationToUsers(userIds: string[], title: string, message: string, data?: any) {
     if (!userIds.length) return;
 

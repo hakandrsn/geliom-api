@@ -1,174 +1,211 @@
-import { Injectable } from '@nestjs/common';
-import { PrismaService } from '../prisma/prisma.service';
-import { Group, GroupMember } from '@prisma/client';
+import { Inject, Injectable } from '@nestjs/common';
+import { FieldValue, Firestore } from 'firebase-admin/firestore';
+import {
+  COLLECTIONS,
+  GroupDoc,
+  GroupMemberEntry,
+  GroupRecord,
+  GroupRole,
+  InviteCodeDoc,
+  JoinRequestDoc,
+  JoinRequestRecord,
+  JoinRequestStatus,
+  nowIso,
+  UserRecord,
+} from '../firebase/firestore.types';
+import { SessionService } from '../session/session.service';
+import { generateInviteCode } from './helpers/invite-code.generator';
 
 @Injectable()
 export class GroupsRepository {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    @Inject('FIRESTORE') private readonly db: Firestore,
+    private readonly sessionService: SessionService,
+  ) {}
 
-  async findById(id: string): Promise<Group | null> {
-    return this.prisma.group.findUnique({
-      where: { id },
-    });
+  private groupRef(groupId: string) {
+    return this.db.collection(COLLECTIONS.GROUPS).doc(groupId);
   }
 
-  async findByInviteCode(inviteCode: string): Promise<Group | null> {
-    return this.prisma.group.findUnique({
-      where: { inviteCode },
-    });
+  private requestsRef(groupId: string) {
+    return this.groupRef(groupId).collection(COLLECTIONS.JOIN_REQUESTS);
   }
 
-  async create(data: { name: string; inviteCode: string; ownerId: string }): Promise<Group> {
-    return this.prisma.group.create({
-      data: {
+  async findById(groupId: string): Promise<GroupRecord | null> {
+    return this.sessionService.getGroup(groupId);
+  }
+
+  async findByInviteCode(inviteCode: string): Promise<GroupRecord | null> {
+    const lookup = await this.db.collection(COLLECTIONS.INVITE_CODES).doc(inviteCode).get();
+    if (!lookup.exists) return null;
+    return this.sessionService.getGroup((lookup.data() as InviteCodeDoc).groupId);
+  }
+
+  /**
+   * Grubu, inviteCodes lookup'ını ve owner'ın groupIds güncellemesini tek
+   * transaction'da oluşturur. Invite code çakışırsa yeni kod ile tekrar dener.
+   */
+  async create(data: { name: string; owner: UserRecord }): Promise<GroupRecord> {
+    const maxAttempts = 10;
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const inviteCode = generateInviteCode();
+      const groupRef = this.db.collection(COLLECTIONS.GROUPS).doc();
+      const now = nowIso();
+
+      const doc: GroupDoc = {
         name: data.name,
-        inviteCode: data.inviteCode,
-        ownerId: data.ownerId,
+        description: null,
+        inviteCode,
+        ownerId: data.owner.id,
+        ownerIsPremium: data.owner.isPremium,
+        version: 0,
         members: {
-          create: {
-            userId: data.ownerId,
+          [data.owner.id]: {
             role: 'ADMIN',
+            displayName: data.owner.displayName,
+            photoUrl: data.owner.photoUrl,
+            customId: data.owner.customId,
+            isMuted: false,
+            joinedAt: now,
           },
         },
-      },
-    });
+        statuses: {},
+        customMoods: [],
+        createdAt: now,
+        updatedAt: now,
+      };
+
+      try {
+        await this.db.runTransaction(async (tx) => {
+          tx.create(this.db.collection(COLLECTIONS.INVITE_CODES).doc(inviteCode), {
+            groupId: groupRef.id,
+          });
+          tx.create(groupRef, doc);
+          tx.update(this.db.collection(COLLECTIONS.USERS).doc(data.owner.id), {
+            groupIds: FieldValue.arrayUnion(groupRef.id),
+            updatedAt: now,
+          });
+        });
+        return { id: groupRef.id, ...doc };
+      } catch (error) {
+        if (error.code === 6 /* ALREADY_EXISTS: invite code çakışması */) continue;
+        throw error;
+      }
+    }
+
+    throw new Error(`Failed to generate unique invite code after ${maxAttempts} attempts`);
   }
 
-  async addMember(
+  /** Üyeyi grup dokümanına ve kullanıcının groupIds listesine ekler. */
+  async addMember(groupId: string, user: UserRecord, role: GroupRole = 'MEMBER') {
+    const entry: GroupMemberEntry = {
+      role,
+      displayName: user.displayName,
+      photoUrl: user.photoUrl,
+      customId: user.customId,
+      isMuted: false,
+      joinedAt: nowIso(),
+    };
+
+    await this.sessionService.mutateGroup(groupId, (group) => {
+      group.members[user.id] = entry;
+      return {
+        event: 'member.joined',
+        patch: { members: { [user.id]: entry } },
+      };
+    });
+
+    await this.db.collection(COLLECTIONS.USERS).doc(user.id).update({
+      groupIds: FieldValue.arrayUnion(groupId),
+      updatedAt: nowIso(),
+    });
+
+    return { groupId, userId: user.id, ...entry };
+  }
+
+  /** Üyeyi (status'üyle birlikte) gruptan ve kullanıcının groupIds listesinden çıkarır. */
+  async removeMember(groupId: string, userId: string) {
+    await this.sessionService.mutateGroup(groupId, (group) => {
+      delete group.members[userId];
+      delete group.statuses[userId];
+      return {
+        event: 'member.left',
+        removed: [`members.${userId}`, `statuses.${userId}`],
+      };
+    });
+
+    await this.db.collection(COLLECTIONS.USERS).doc(userId).update({
+      groupIds: FieldValue.arrayRemove(groupId),
+      updatedAt: nowIso(),
+    });
+
+    return { groupId, userId };
+  }
+
+  /** Grup silindiğinde tüm üyelerin groupIds listesinden düşürür. */
+  async detachGroupFromUsers(groupId: string, userIds: string[]) {
+    if (!userIds.length) return;
+    const batch = this.db.batch();
+    for (const userId of userIds) {
+      batch.update(this.db.collection(COLLECTIONS.USERS).doc(userId), {
+        groupIds: FieldValue.arrayRemove(groupId),
+        updatedAt: nowIso(),
+      });
+    }
+    await batch.commit();
+  }
+
+  // ---------------------------------------------------------------
+  // Join Requests (groups/{id}/joinRequests alt koleksiyonu)
+  // ---------------------------------------------------------------
+
+  async createJoinRequest(groupId: string, user: UserRecord): Promise<JoinRequestRecord> {
+    const ref = this.requestsRef(groupId).doc();
+    const doc: JoinRequestDoc = {
+      userId: user.id,
+      displayName: user.displayName,
+      status: 'PENDING',
+      createdAt: nowIso(),
+      respondedAt: null,
+    };
+    await ref.set(doc);
+    return { id: ref.id, ...doc };
+  }
+
+  async findPendingRequest(groupId: string, userId: string): Promise<JoinRequestRecord | null> {
+    const snap = await this.requestsRef(groupId)
+      .where('userId', '==', userId)
+      .where('status', '==', 'PENDING')
+      .limit(1)
+      .get();
+    if (snap.empty) return null;
+    const doc = snap.docs[0];
+    return { id: doc.id, ...(doc.data() as JoinRequestDoc) };
+  }
+
+  async findJoinRequestById(groupId: string, requestId: string): Promise<JoinRequestRecord | null> {
+    const snap = await this.requestsRef(groupId).doc(requestId).get();
+    if (!snap.exists) return null;
+    return { id: snap.id, ...(snap.data() as JoinRequestDoc) };
+  }
+
+  async getGroupRequests(
     groupId: string,
-    userId: string,
-    role: 'ADMIN' | 'MEMBER' = 'MEMBER',
-  ): Promise<GroupMember> {
-    return this.prisma.groupMember.create({
-      data: {
-        groupId,
-        userId,
-        role,
-      },
-    });
+    status: JoinRequestStatus = 'PENDING',
+  ): Promise<JoinRequestRecord[]> {
+    const snap = await this.requestsRef(groupId).where('status', '==', status).get();
+    return snap.docs.map((doc) => ({ id: doc.id, ...(doc.data() as JoinRequestDoc) }));
   }
 
-  async removeMember(groupId: string, userId: string): Promise<GroupMember> {
-    return this.prisma.groupMember.delete({
-      where: {
-        userId_groupId: { userId, groupId },
-      },
-    });
-  }
-
-  async isMember(groupId: string, userId: string): Promise<boolean> {
-    const member = await this.prisma.groupMember.findUnique({
-      where: {
-        userId_groupId: { userId, groupId },
-      },
-    });
-    return member !== null;
-  }
-
-  async getMemberRole(groupId: string, userId: string): Promise<'ADMIN' | 'MEMBER' | null> {
-    const member = await this.prisma.groupMember.findUnique({
-      where: { userId_groupId: { userId, groupId } },
-      select: { role: true },
-    });
-    return member?.role as 'ADMIN' | 'MEMBER' | null;
-  }
-
-  // Join Requests
-  async createJoinRequest(userId: string, groupId: string) {
-    return this.prisma.joinRequest.create({
-      data: {
-        userId,
-        groupId,
-        status: 'PENDING',
-      },
-    });
-  }
-
-  async findPendingRequest(userId: string, groupId: string) {
-    return this.prisma.joinRequest.findFirst({
-      where: {
-        userId,
-        groupId,
-        status: 'PENDING',
-      },
-    });
-  }
-
-  async findJoinRequestById(id: string) {
-    return this.prisma.joinRequest.findUnique({
-      where: { id },
-    });
-  }
-
-  async getGroupRequests(groupId: string, status: 'PENDING' | 'APPROVED' | 'REJECTED' = 'PENDING') {
-    return this.prisma.joinRequest.findMany({
-      where: {
-        groupId,
-        status,
-      },
-      include: {
-        user: true, // Include user details
-      },
-    });
-  }
-
-  async updateJoinRequestStatus(id: string, status: 'APPROVED' | 'REJECTED') {
-    return this.prisma.joinRequest.update({
-      where: { id },
-      data: { status },
-    });
-  }
-
-  // Helpers for limits
-  async countUserMemberships(userId: string): Promise<number> {
-    return this.prisma.groupMember.count({
-      where: { userId },
-    });
-  }
-
-  async countMembers(groupId: string): Promise<number> {
-    return this.prisma.groupMember.count({
-      where: { groupId },
-    });
-  }
-
-  // Update Group
-  async update(groupId: string, data: { name?: string; description?: string }) {
-    return this.prisma.group.update({
-      where: { id: groupId },
-      data,
-    });
-  }
-
-  // Custom Moods
-  async createGroupMood(groupId: string, data: { text: string; emoji?: string; mood: string }) {
-    return this.prisma.groupMood.create({
-      data: {
-        groupId,
-        text: data.text,
-        mood: data.mood,
-        emoji: data.emoji ?? null,
-      },
-    });
-  }
-
-  async countGroupMoods(groupId: string): Promise<number> {
-    return this.prisma.groupMood.count({
-      where: { groupId },
-    });
-  }
-
-  async setGroupMuteStatus(userId: string, groupId: string, isMuted: boolean) {
-    return this.prisma.notificationSetting.upsert({
-      where: {
-        userId_groupId: { userId, groupId },
-      },
-      update: { isMuted },
-      create: {
-        userId,
-        groupId,
-        isMuted,
-      },
+  async updateJoinRequestStatus(
+    groupId: string,
+    requestId: string,
+    status: 'APPROVED' | 'REJECTED',
+  ): Promise<void> {
+    await this.requestsRef(groupId).doc(requestId).update({
+      status,
+      respondedAt: nowIso(),
     });
   }
 }

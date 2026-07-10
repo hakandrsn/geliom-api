@@ -1,9 +1,9 @@
-import { Controller, Get, Post, Body } from '@nestjs/common';
+import { Controller, Get } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { AuthService } from './auth.service';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { Public } from '../common/decorators/public.decorator';
-import { User } from '@prisma/client';
+import { UserRecord } from '../firebase/firestore.types';
 
 @ApiTags('Auth')
 @Controller('auth')
@@ -17,7 +17,7 @@ export class AuthController {
   @Get('me')
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Get current user info' })
-  async me(@CurrentUser() user: User) {
+  async me(@CurrentUser() user: UserRecord) {
     return {
       id: user.id,
       customId: user.customId,

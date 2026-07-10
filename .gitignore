@@ -27,9 +27,11 @@ npm-debug.log*
 # Test
 coverage/
 
-# Prisma
-prisma/*.db
-prisma/*.db-journal
+# Firebase
+firebase-service-account.json
+firebase-debug.log
+firestore-debug.log
+ui-debug.log
 
 # Misc
 repomix-output.xml

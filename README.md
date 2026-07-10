@@ -1,30 +1,85 @@
-﻿# Geliom API
+# Geliom API
 
-NestJS + Prisma + Socket.io ile geliştirilmiş production-ready mobil uygulama backend'i.
+NestJS + Firestore + Socket.io ile geliştirilmiş, session tabanlı gerçek zamanlı mobil uygulama backend'i.
 
-## Özellikler
+## Mimari
 
-- **Authentication**: Firebase Auth entegrasyonu (JWT validation)
-- **Database**: PostgreSQL + Prisma ORM
-- **Real-time**: Socket.io ile anlık status/mood güncellemeleri
-- **Rate Limiting**: In-memory rate limiting (Status/Mood hariç)
-- **Activity Logging**: Grup katılma/ayrılma logları
-- **Logging**: Pino ile renkli, yapılandırılmış loglama
+- **Database**: Firestore (grup başına **tek doküman** — üyeler, status'ler ve custom mood'lar tek objede)
+- **Authentication**: Firebase Auth (JWT validation)
+- **Real-time**: Socket.io **session** sistemi — kullanıcı bir grup için session açar, grubun tüm verisi sunucu belleğinde tek obje olarak tutulur, her değişiklik session'daki herkese anında yayınlanır
+- **Push**: OneSignal — session'da OLMAYAN üyelere 15 sn debounce ile push; session'dakiler değişikliği zaten socket'ten görür
+- **Premium**: Adapty webhook ile güncellenir; free 1 grup / premium 7 grup, grup kapasitesi 5/20, custom mood premium-only (max 10)
+
+### Session modeli
+
+- Kullanıcı birden fazla gruba üye olabilir ama **aynı anda tek grupta session** açabilir.
+- Başka grupta `session:open` gönderilirse önceki session `switched` sebebiyle otomatik kapanır.
+- Grup verisi bellekte "canlı obje" olarak tutulur; yazmalar 1 sn coalesce edilerek Firestore'a yansıtılır. Son üye ayrıldıktan 60 sn sonra obje bellekten düşer.
+- REST üzerinden yapılan değişiklikler de (join onayı, grup güncelleme vb.) aynı canlı objeden geçer ve session'a anında yayınlanır.
+
+## Socket Event Sözleşmesi
+
+Bağlantı: `io(URL, { auth: { token: <firebaseIdToken> } })`
+
+### Client → Server (hepsi ack döner: `{ok: true, ...}` veya `{ok: false, error}`)
+
+| Event | Payload | Açıklama |
+|---|---|---|
+| `session:open` | `{ groupId }` | Grup session'ı açar; `session:state` yayınlanır. Başka gruptaki session otomatik kapanır. |
+| `session:close` | `{}` | Aktif session'ı kapatır. |
+| `status:update` | `{ text, emoji?, mood? }` | Status/mood günceller. `groupId` gönderilmez — aktif session'dan çözülür. |
+
+### Server → Client
+
+| Event | Payload | Açıklama |
+|---|---|---|
+| `session:state` | `{ group, version, onlineUserIds }` | Açılışta/resync'te grubun tam objesi. |
+| `session:update` | `{ version, event, patch, removed? }` | Değişiklik yayını. `event`: `status.updated`, `member.joined`, `member.left`, `group.updated`, `mood.added`, `premium.changed`. `patch` deep-merge edilir, `removed` path'leri silinir (örn. `members.abc123`). Diziler (`customMoods`) olduğu gibi değiştirilir. |
+| `presence:update` | `{ userId, online }` | Session'a giren/çıkan üye. |
+| `session:closed` | `{ reason }` | `removed` (gruptan atıldın), `deleted` (grup silindi), `switched` (başka grupta session açtın), `server`. |
+| `premium:update` | `{ isPremium }` | Kullanıcının kendi premium durumu değişti. |
+
+**Client resync kuralı:** `session:update.version !== localVersion + 1` ise veya socket reconnect olduysa `session:open`'ı tekrar gönder — tam `session:state` ile eşitlenirsin. Sunucu restart'ı bu şekilde kendini onarır.
+
+## Firestore Veri Modeli
+
+```
+users/{uid}                     → email, customId, displayName, photoUrl,
+                                  isPremium, subscriptionStatus, groupIds[]
+groups/{groupId}                → name, description, inviteCode, ownerId,
+                                  ownerIsPremium, version,
+                                  members{uid: {role, displayName, photoUrl, customId, isMuted, joinedAt}},
+                                  statuses{uid: {text, emoji, mood, updatedAt}},
+                                  customMoods[]
+groups/{groupId}/joinRequests/  → userId, displayName, status, createdAt, respondedAt
+inviteCodes/{CODE}              → groupId        (uniqueness lookup)
+customIds/{CUSTOMID}            → userId         (uniqueness lookup)
+```
+
+## REST Endpoints (prefix: `/api`)
+
+- `GET  /auth/me`, `GET /auth/health` (public)
+- `GET/PATCH/DELETE /users/me`, `GET /users/me/groups`, `GET /users/by-custom-id/:customId`
+- `POST /groups`, `POST /groups/join`, `DELETE /groups/:id/leave`
+- `POST /groups/:id/join-request`, `GET /groups/:id/requests`, `POST /groups/:id/requests/:requestId/respond`
+- `PATCH /groups/:id`, `POST /groups/:id/moods`, `POST /groups/:id/mute`
+- `POST /webhooks/adapty` (public, `Authorization: <ADAPTY_WEBHOOK_SECRET>` ile doğrulanır)
+
+Swagger: `/docs`
 
 ## Proje Yapısı
 
 ```
 src/
-├── auth/           # JWT validation, Supabase token doğrulama
+├── auth/           # Firebase JWT doğrulama, lazy user sync
 ├── users/          # Kullanıcı yönetimi, custom ID üretimi
-├── groups/         # Grup CRUD, join request, dashboard
-├── status/         # Status ve mood yönetimi (performanslı)
-├── notifications/  # Rate limiting, pending notifications
-├── socket/         # Socket.io gateway
-├── activity-log/   # Activity logging servisi
-├── prisma/         # Prisma service
+├── groups/         # Grup CRUD, join request, mood, mute
+├── session/        # Socket.io gateway + session yönetimi (mutateGroup)
+├── adapty/         # Adapty webhook → premium güncelleme
+├── notifications/  # OneSignal + push debounce (15 sn)
+├── firebase/       # Firebase Admin + Firestore provider, doküman tipleri
 ├── logger/         # Pino logger module
-├── rate-limit/     # Rate limiting module
+├── rate-limit/     # In-memory rate limiting (HTTP)
 └── common/         # Guards, decorators, filters
 ```
 
@@ -33,8 +88,7 @@ src/
 ### Gereksinimler
 
 - Node.js 20+
-- PostgreSQL 14+
-- npm veya yarn
+- Firebase projesi (Auth + Firestore)
 
 ### Local Development
 
@@ -50,116 +104,26 @@ npm install
 cp env.example .env
 ```
 
-3. **Postgres bilgilerini al ve `.env` dosyasını düzenle:**
+3. **Firebase service account anahtarını indir:**
 
-Supabase Dashboard'dan:
-- **Database URL**: Project Settings > Database > Connection string (URI)
-- **JWT Secret**: Project Settings > API > JWT Secret
+Firebase Console > Project Settings > Service Accounts > Generate new private key
+→ `firebase-service-account.json` olarak proje köküne koy (gitignore'da).
 
-```env
-NODE_ENV=development
-PORT=3000
-
-# Supabase Database (pooler - transaction mode)
-DATABASE_URL="postgresql://postgres.[PROJECT_REF]:[PASSWORD]@aws-0-eu-central-1.pooler.supabase.com:6543/postgres?pgbouncer=true"
-
-# Direct connection (migrations için)
-DIRECT_URL="postgresql://postgres.[PROJECT_REF]:[PASSWORD]@aws-0-eu-central-1.pooler.supabase.com:5432/postgres"
-
-# Supabase Auth
-SUPABASE_URL="https://[PROJECT_REF].supabase.co"
-SUPABASE_JWT_SECRET="your-supabase-jwt-secret"
-```
-
-4. **Veritabanı şemasını Postgres'e push et:**
+4. **Çalıştır:**
 
 ```bash
-# Schema'yı Postgres'e push (önerilen)
-npx prisma db push
-
-# Veya migration ile
-npx prisma migrate dev --name init
-```
-
-5. **Uygulamayı başlat:**
-
-```bash
-# Development (hot reload)
 npm run start:dev
-
-# Production build
-npm run build
-npm run start:prod
 ```
 
-### Docker ile Çalıştırma
+Lokal test için Firestore emülatörü kullanılabilir:
 
 ```bash
-# API servisini başlat
-docker-compose up -d
+firebase emulators:start --only firestore
+FIRESTORE_EMULATOR_HOST=localhost:8080 npm run start:dev
 ```
 
-## API Endpoints
+## Bildirim Akışı
 
-### Auth
-- `GET /api/auth/me` - Mevcut kullanıcı bilgileri
-- `GET /api/auth/health` - Health check (public)
-
-### Users
-- `GET /api/users/me` - Profil bilgileri
-- `PATCH /api/users/me` - Profil güncelle
-- `GET /api/users/me/groups` - Kullanıcının grupları
-- `GET /api/users/by-custom-id/:customId` - Custom ID ile ara
-
-### Groups
-- `POST /api/groups` - Yeni grup oluştur
-- `GET /api/groups` - Kullanıcının grupları
-- `GET /api/groups/:id` - Grup detayları
-- `PATCH /api/groups/:id` - Grup güncelle
-- `DELETE /api/groups/:id` - Grup sil
-- `POST /api/groups/join` - Gruba katılma isteği
-- `POST /api/groups/:id/leave` - Gruptan ayrıl
-- `GET /api/groups/:id/dashboard` - Dashboard verileri
-- `GET /api/groups/:id/join-requests` - Katılma istekleri
-- `POST /api/groups/:id/join-requests/:requestId/approve` - İsteği onayla
-- `POST /api/groups/:id/join-requests/:requestId/reject` - İsteği reddet
-
-### Status
-- `GET /api/status/statuses` - Tüm statusler
-- `PATCH /api/status/user-status` - Status güncelle (rate limit yok)
-- `GET /api/status/moods` - Tüm moodlar
-- `PATCH /api/status/user-mood` - Mood güncelle (rate limit yok)
-
-## WebSocket Events
-
-### Client -> Server
-- `update_status` - Status güncelle
-- `update_mood` - Mood güncelle
-- `join_room` - Odaya katıl
-- `leave_room` - Odadan ayrıl
-- `ping` - Connection health check
-
-### Server -> Client
-- `connected` - Bağlantı onayı
-- `status_updated` - Status değişikliği
-- `mood_updated` - Mood değişikliği
-- `member_joined` - Yeni üye katıldı
-- `member_left` - Üye ayrıldı
-- `join_request` - Yeni katılma isteği
-
-## Swagger Dokümantasyonu
-
-Development modunda `/docs` adresinde Swagger UI mevcut.
-
-## Deployment (Render.com)
-
-1. Render.com'da yeni Web Service oluştur
-2. Repository'yi bağla
-3. Environment variables ekle:
-4. Docker deployment seç
-5. Deploy!
-
-## Lisans
-
-MIT
-
+1. Kullanıcı `status:update` gönderir → session'daki herkese anında `session:update` yayınlanır.
+2. Session'da olmayan, mute etmemiş üyeler için 15 sn'lik debounce başlar; bu sürede yeni güncelleme gelirse süre sıfırlanır.
+3. Süre dolunca **en güncel** status ile OneSignal push atılır. Push anında session açmış üyeler listeden çıkarılır.

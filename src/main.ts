@@ -13,6 +13,9 @@ async function bootstrap() {
   // Pino Logger
   app.useLogger(app.get(Logger));
 
+  // Shutdown'da bellekteki session'ların Firestore'a flush edilmesi için
+  app.enableShutdownHooks();
+
   // Global Validation Pipe
   app.useGlobalPipes(
     new ValidationPipe({
@@ -34,15 +37,17 @@ async function bootstrap() {
   // API Prefix
   app.setGlobalPrefix('api');
 
-  // Swagger Documentation
-  const config = new DocumentBuilder()
-    .setTitle('Geliom API')
-    .setDescription('Geliom Mobile App Backend API')
-    .setVersion('1.0')
-    .addBearerAuth()
-    .build();
-  const document = SwaggerModule.createDocument(app, config);
-  SwaggerModule.setup('docs', app, document);
+  // Swagger Documentation — prod'da kapalı (auth'suz API haritası sızdırmamak için)
+  if (process.env.NODE_ENV !== 'production') {
+    const config = new DocumentBuilder()
+      .setTitle('Geliom API')
+      .setDescription('Geliom Mobile App Backend API')
+      .setVersion('1.0')
+      .addBearerAuth()
+      .build();
+    const document = SwaggerModule.createDocument(app, config);
+    SwaggerModule.setup('docs', app, document);
+  }
 
   // Start server
   const configService = app.get(ConfigService);

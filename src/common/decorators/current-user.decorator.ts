@@ -1,12 +1,5 @@
 import { createParamDecorator, ExecutionContext } from '@nestjs/common';
 
-export interface JwtPayload {
-  sub: string; // User UUID from Supabase Auth
-  email?: string;
-  iat?: number;
-  exp?: number;
-}
-
 export interface CurrentUserData {
   id: string;
   email?: string;

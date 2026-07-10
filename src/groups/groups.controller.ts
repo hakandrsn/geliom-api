@@ -1,73 +1,110 @@
-import { Controller, Post, Body, Delete, Param, UseGuards, Get, Patch } from '@nestjs/common';
+import { Controller, Post, Body, Delete, Param, Get, Patch } from '@nestjs/common';
+import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { GroupsService } from './groups.service';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
-import { FirebaseAuthGuard } from '../common/guards/firebase-auth.guard';
+import {
+  AddMoodDto,
+  CreateGroupDto,
+  JoinGroupDto,
+  MuteGroupDto,
+  RespondRequestDto,
+  UpdateGroupDto,
+} from './dto';
 
-@UseGuards(FirebaseAuthGuard)
+@ApiTags('Groups')
+@ApiBearerAuth()
 @Controller('groups')
 export class GroupsController {
   constructor(private readonly groupsService: GroupsService) {}
 
   @Post()
-  async create(@CurrentUser() user: { id: string }, @Body('name') name: string) {
-    return this.groupsService.createGroup(user.id, name);
+  @ApiOperation({ summary: 'Create a new group' })
+  async create(@CurrentUser() user: { id: string }, @Body() dto: CreateGroupDto) {
+    return this.groupsService.createGroup(user.id, dto.name);
   }
 
   @Post('join')
-  async join(@CurrentUser() user: { id: string }, @Body('inviteCode') inviteCode: string) {
-    return this.groupsService.joinGroup(user.id, inviteCode);
+  @ApiOperation({ summary: 'Join a group by invite code' })
+  async join(@CurrentUser() user: { id: string }, @Body() dto: JoinGroupDto) {
+    return this.groupsService.joinGroup(user.id, dto.inviteCode);
   }
 
   @Delete(':id/leave')
+  @ApiOperation({ summary: 'Leave a group' })
   async leave(@CurrentUser() user: { id: string }, @Param('id') groupId: string) {
     return this.groupsService.leaveGroup(user.id, groupId);
   }
 
+  @Delete(':id/members/:userId')
+  @ApiOperation({ summary: 'Remove a member from the group (admin only)' })
+  async removeMember(
+    @CurrentUser() user: { id: string },
+    @Param('id') groupId: string,
+    @Param('userId') targetUserId: string,
+  ) {
+    return this.groupsService.removeMember(user.id, groupId, targetUserId);
+  }
+
   @Post(':id/join-request')
+  @ApiOperation({ summary: 'Request to join a group' })
   async requestJoin(@CurrentUser() user: { id: string }, @Param('id') groupId: string) {
     return this.groupsService.requestToJoin(user.id, groupId);
   }
 
-  // Admin only: Get pending requests
   @Get(':id/requests')
+  @ApiOperation({ summary: 'Get pending join requests (admin only)' })
   async getRequests(@CurrentUser() user: { id: string }, @Param('id') groupId: string) {
     return this.groupsService.getGroupRequests(user.id, groupId);
   }
 
-  // Admin only: Respond to request
   @Post(':id/requests/:requestId/respond')
+  @ApiOperation({ summary: 'Respond to a join request (admin only)' })
   async respondToRequest(
     @CurrentUser() user: { id: string },
     @Param('id') groupId: string,
     @Param('requestId') requestId: string,
-    @Body('response') response: 'APPROVED' | 'REJECTED',
+    @Body() dto: RespondRequestDto,
   ) {
-    return this.groupsService.respondToRequest(user.id, groupId, requestId, response);
+    return this.groupsService.respondToRequest(user.id, groupId, requestId, dto.response);
   }
+
   @Patch(':id')
+  @ApiOperation({ summary: 'Update group name/description (admin only)' })
   async update(
     @CurrentUser() user: { id: string },
     @Param('id') groupId: string,
-    @Body('name') name?: string,
-    @Body('description') description?: string,
+    @Body() dto: UpdateGroupDto,
   ) {
-    return this.groupsService.updateGroup(user.id, groupId, { name, description });
+    return this.groupsService.updateGroup(user.id, groupId, dto);
   }
+
   @Post(':id/moods')
+  @ApiOperation({ summary: 'Add a custom mood (admin only, premium)' })
   async addMood(
     @CurrentUser() user: { id: string },
     @Param('id') groupId: string,
-    @Body() data: { text: string; emoji?: string; mood: string },
+    @Body() dto: AddMoodDto,
   ) {
-    return this.groupsService.addCustomMood(user.id, groupId, data);
+    return this.groupsService.addCustomMood(user.id, groupId, dto);
+  }
+
+  @Delete(':id/moods/:moodId')
+  @ApiOperation({ summary: 'Remove a custom mood (admin only)' })
+  async removeMood(
+    @CurrentUser() user: { id: string },
+    @Param('id') groupId: string,
+    @Param('moodId') moodId: string,
+  ) {
+    return this.groupsService.removeCustomMood(user.id, groupId, moodId);
   }
 
   @Post(':id/mute')
+  @ApiOperation({ summary: 'Mute/unmute group notifications' })
   async mute(
     @CurrentUser() user: { id: string },
     @Param('id') groupId: string,
-    @Body('isMuted') isMuted: boolean,
+    @Body() dto: MuteGroupDto,
   ) {
-    return this.groupsService.muteGroup(user.id, groupId, isMuted);
+    return this.groupsService.muteGroup(user.id, groupId, dto.isMuted);
   }
 }
