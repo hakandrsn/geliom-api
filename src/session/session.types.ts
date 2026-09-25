@@ -6,11 +6,14 @@ export type DeepPartial<T> = {
 
 export type SessionUpdateEvent =
   | 'status.updated'
+  | 'status.cleared'
   | 'member.joined'
   | 'member.left'
   | 'group.updated'
   | 'mood.added'
   | 'mood.removed'
+  | 'options.updated'
+  | 'plan.changed'
   | 'premium.changed';
 
 /**
@@ -24,7 +27,7 @@ export interface SessionUpdate {
   removed?: string[];
 }
 
-export type SessionClosedReason = 'removed' | 'deleted' | 'switched' | 'server';
+export type SessionClosedReason = 'removed' | 'deleted' | 'switched' | 'server' | 'paused';
 
 export interface GroupSession {
   group: GroupRecord;
@@ -42,10 +45,13 @@ export const SESSION_EVENTS = {
   CLOSED: 'session:closed',
   PRESENCE: 'presence:update',
   PREMIUM: 'premium:update',
+  /** Grubun duraklatılma durumu değişti — üye session'ı yeniden açmalı */
+  PLAN_CHANGED: 'group:plan-changed',
   // client -> server
   OPEN: 'session:open',
   CLOSE: 'session:close',
   STATUS_UPDATE: 'status:update',
+  STATUS_CLEAR: 'status:clear',
 } as const;
 
 export function sessionRoom(groupId: string): string {

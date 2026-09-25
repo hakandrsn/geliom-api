@@ -1,14 +1,15 @@
-import { Controller, Post, Body, Delete, Param, Get, Patch } from '@nestjs/common';
+import { Controller, Post, Body, Delete, Param, Get, Patch, Put } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { GroupsService } from './groups.service';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import {
-  AddMoodDto,
   CreateGroupDto,
   JoinGroupDto,
   MuteGroupDto,
   RespondRequestDto,
   UpdateGroupDto,
+  UpdateNotificationsDto,
+  UpdateOptionsDto,
 } from './dto';
 
 @ApiTags('Groups')
@@ -78,28 +79,30 @@ export class GroupsController {
     return this.groupsService.updateGroup(user.id, groupId, dto);
   }
 
-  @Post(':id/moods')
-  @ApiOperation({ summary: 'Add a custom mood (admin only, premium)' })
-  async addMood(
+  @Put(':id/options')
+  @ApiOperation({ summary: 'Replace group status/mood option lists (owner, premium)' })
+  async updateOptions(
     @CurrentUser() user: { id: string },
     @Param('id') groupId: string,
-    @Body() dto: AddMoodDto,
+    @Body() dto: UpdateOptionsDto,
   ) {
-    return this.groupsService.addCustomMood(user.id, groupId, dto);
+    return this.groupsService.updateOptions(user.id, groupId, dto);
   }
 
-  @Delete(':id/moods/:moodId')
-  @ApiOperation({ summary: 'Remove a custom mood (admin only)' })
-  async removeMood(
+  @Patch(':id/notifications')
+  @ApiOperation({ summary: 'Update my notification preferences for this group' })
+  async updateNotifications(
     @CurrentUser() user: { id: string },
     @Param('id') groupId: string,
-    @Param('moodId') moodId: string,
+    @Body() dto: UpdateNotificationsDto,
   ) {
-    return this.groupsService.removeCustomMood(user.id, groupId, moodId);
+    return this.groupsService.updateNotificationPrefs(user.id, groupId, dto);
   }
 
   @Post(':id/mute')
-  @ApiOperation({ summary: 'Mute/unmute group notifications' })
+  @ApiOperation({
+    summary: '(Legacy) Mute/unmute group notifications — use PATCH :id/notifications',
+  })
   async mute(
     @CurrentUser() user: { id: string },
     @Param('id') groupId: string,

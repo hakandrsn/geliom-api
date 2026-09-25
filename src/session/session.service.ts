@@ -9,6 +9,7 @@ import { PinoLogger } from 'nestjs-pino';
 import { Firestore } from 'firebase-admin/firestore';
 import { Server, Socket } from 'socket.io';
 import { COLLECTIONS, GroupDoc, GroupRecord, nowIso } from '../firebase/firestore.types';
+import { normalizeGroupDoc } from '../common/group-options';
 import {
   GroupSession,
   SESSION_EVENTS,
@@ -83,7 +84,7 @@ export class SessionService implements BeforeApplicationShutdown {
     client: Socket,
     userId: string,
     groupId: string,
-  ): Promise<{ group: GroupRecord; onlineUserIds: string[] }> {
+  ): Promise<{ group: GroupRecord; onlineUserIds: string[]; paused?: boolean }> {
     const previousGroupId = this.userActiveGroup.get(userId);
 
     // Başka grupta aktif session varsa otomatik kapat (switch)
@@ -108,6 +109,14 @@ export class SessionService implements BeforeApplicationShutdown {
       // Üye değilse session boşsa bellekte tutma
       if (session.connections.size === 0 && !session.dirty) this.sessions.delete(groupId);
       throw new ConflictException('Bu grubun üyesi değilsiniz');
+    }
+
+    // Duraklatılmış grup: yalnızca anlık görüntü döner; odaya katılım,
+    // presence ve canlı yayın yok (status güncellemesi de aktif session gerektirir)
+    if (session.group.isPaused) {
+      const snapshot = session.group;
+      if (session.connections.size === 0 && !session.dirty) this.sessions.delete(groupId);
+      return { group: snapshot, onlineUserIds: [], paused: true };
     }
 
     if (session.evictTimer) {
@@ -248,7 +257,7 @@ export class SessionService implements BeforeApplicationShutdown {
     await this.db.runTransaction(async (tx) => {
       const snap = await tx.get(ref);
       if (!snap.exists) throw new NotFoundException('Grup bulunamadı');
-      const group: GroupRecord = { id: groupId, ...(snap.data() as GroupDoc) };
+      const group: GroupRecord = normalizeGroupDoc({ id: groupId, ...(snap.data() as GroupDoc) });
       mutator(group);
       group.version += 1;
       group.updatedAt = nowIso();
@@ -387,7 +396,7 @@ export class SessionService implements BeforeApplicationShutdown {
   private async fetchGroup(groupId: string): Promise<GroupRecord | null> {
     const snap = await this.groupRef(groupId).get();
     if (!snap.exists) return null;
-    return { id: groupId, ...(snap.data() as GroupDoc) };
+    return normalizeGroupDoc({ id: groupId, ...(snap.data() as GroupDoc) });
   }
 
   private getSocket(socketId: string): Socket | undefined {

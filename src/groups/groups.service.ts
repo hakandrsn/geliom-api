@@ -1,10 +1,24 @@
-import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
-import { CustomMood, GroupRecord, nowIso } from '../firebase/firestore.types';
+import {
+  BadRequestException,
+  ConflictException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
+import { GroupMoodOption, GroupOption, GroupRecord, nowIso } from '../firebase/firestore.types';
+import {
+  DEFAULT_MOOD_OPTIONS,
+  DEFAULT_STATUS_OPTIONS,
+  MAX_CUSTOM_OPTIONS,
+  newOptionId,
+} from '../common/group-options';
 import { NotificationsService } from '../notifications/notifications.service';
 import { SessionService } from '../session/session.service';
 import { UsersService } from '../users/users.service';
 import { ERROR_MESSAGES, PREMIUM_LIMITS } from '../common/constants/premium.constants';
+import { PremiumLimitException } from '../common/exceptions/premium-limit.exception';
 import { GroupsRepository } from './groups.repository';
+import { UpdateNotificationsDto, UpdateOptionsDto } from './dto';
+import { GroupNotificationPrefs, resolveNotificationPrefs } from '../common/notification-prefs';
 
 @Injectable()
 export class GroupsService {
@@ -33,6 +47,7 @@ export class GroupsService {
       throw new ConflictException('Zaten bu grubun üyesisiniz');
     }
 
+    this.assertNotPaused(group);
     this.assertMembershipLimit(user.groupIds.length, user.isPremium);
     this.assertGroupCapacity(group);
 
@@ -48,9 +63,7 @@ export class GroupsService {
     // Kural: admin gruptan ayrılamaz — önce tüm üyeleri çıkarmalıdır.
     // Grupta yalnız kaldıysa ayrılmak grubu tamamen siler.
     if (group.ownerId === userId) {
-      const otherMemberCount = Object.keys(group.members).filter(
-        (id) => id !== userId,
-      ).length;
+      const otherMemberCount = Object.keys(group.members).filter((id) => id !== userId).length;
 
       if (otherMemberCount > 0) {
         throw new ConflictException(
@@ -75,9 +88,7 @@ export class GroupsService {
     const group = await this.assertAdmin(groupId, adminId);
 
     if (targetUserId === adminId) {
-      throw new ConflictException(
-        'Kendinizi çıkaramazsınız — gruptan ayrılmayı kullanın',
-      );
+      throw new ConflictException('Kendinizi çıkaramazsınız — gruptan ayrılmayı kullanın');
     }
     if (!group.members[targetUserId]) {
       throw new NotFoundException('Üye bulunamadı');
@@ -103,10 +114,14 @@ export class GroupsService {
       throw new ConflictException('Zaten bu grubun üyesisiniz');
     }
 
+    this.assertNotPaused(group);
+
     const pendingRequest = await this.groupsRepository.findPendingRequest(groupId, userId);
     if (pendingRequest) throw new ConflictException('Zaten bekleyen bir isteğiniz var');
 
     const user = await this.usersService.findByIdOrThrow(userId);
+    // Onaylansa bile katılamayacak kullanıcı istek göndermesin
+    this.assertMembershipLimit(user.groupIds.length, user.isPremium);
     const joinRequest = await this.groupsRepository.createJoinRequest(groupId, user);
 
     const userName = user.displayName || 'Bir kullanıcı';
@@ -138,12 +153,28 @@ export class GroupsService {
     if (request.status !== 'PENDING') throw new ConflictException('Bu istek zaten yanıtlanmış');
 
     if (response === 'APPROVED') {
+      this.assertNotPaused(group);
       this.assertGroupCapacity(group);
 
       const requester = await this.usersService.findById(request.userId);
       if (!requester) throw new NotFoundException('İstek sahibi kullanıcı bulunamadı');
 
-      await this.groupsRepository.addMember(groupId, requester);
+      try {
+        await this.groupsRepository.addMember(groupId, requester);
+      } catch (error) {
+        // Onaylanan kişinin kendi limiti dolu: admin'e onun durumunu anlatan kod
+        if (error instanceof PremiumLimitException && error.code === 'MEMBERSHIP_LIMIT') {
+          const limit = requester.isPremium
+            ? PREMIUM_LIMITS.PREMIUM.MAX_MEMBERSHIPS
+            : PREMIUM_LIMITS.FREE.MAX_MEMBERSHIPS;
+          throw new PremiumLimitException(
+            'REQUESTER_MEMBERSHIP_LIMIT',
+            ERROR_MESSAGES.PREMIUM.REQUESTER_MAX_GROUPS(limit),
+            { limit },
+          );
+        }
+        throw error;
+      }
 
       await this.notificationsService.sendNotificationToUser(
         request.userId,
@@ -178,82 +209,103 @@ export class GroupsService {
     });
   }
 
-  async addCustomMood(
-    userId: string,
-    groupId: string,
-    data: { text: string; emoji?: string; mood: string },
-  ) {
+  /**
+   * Grubun durum / ruh hali listelerini sahibin gönderdiği sırayla yazar.
+   * Yalnızca grup sahibi ve Premium. Varsayılanların metni değişmez; özel
+   * seçenekler eklenebilir/düzenlenebilir; listede olmayan silinmiş sayılır.
+   */
+  async updateOptions(userId: string, groupId: string, dto: UpdateOptionsDto) {
     const group = await this.assertAdmin(groupId, userId);
-
-    const config = group.ownerIsPremium ? PREMIUM_LIMITS.PREMIUM : PREMIUM_LIMITS.FREE;
-
-    if (!config.CAN_ADD_CUSTOM_MOOD) {
-      throw new ConflictException(ERROR_MESSAGES.PREMIUM.CUSTOM_MOOD_RESTRICTED);
-    }
-    if (group.customMoods.length >= config.MAX_CUSTOM_MOODS) {
-      throw new ConflictException(
-        ERROR_MESSAGES.PREMIUM.MAX_CUSTOM_MOODS_REACHED(config.MAX_CUSTOM_MOODS),
+    if (!group.ownerIsPremium) {
+      throw new PremiumLimitException(
+        'OPTIONS_PREMIUM',
+        ERROR_MESSAGES.PREMIUM.OPTIONS_RESTRICTED,
+        { isPremium: false },
       );
     }
 
-    const mood: CustomMood = {
-      id: `mood_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-      text: data.text,
-      emoji: data.emoji,
-      mood: data.mood,
-      createdAt: nowIso(),
-    };
-
-    await this.sessionService.mutateGroup(groupId, (g) => {
-      g.customMoods.push(mood);
-      return {
-        event: 'mood.added',
-        patch: { customMoods: g.customMoods },
-      };
+    const updated = await this.sessionService.mutateGroup(groupId, (g) => {
+      if (!g.ownerIsPremium) {
+        throw new PremiumLimitException(
+          'OPTIONS_PREMIUM',
+          ERROR_MESSAGES.PREMIUM.OPTIONS_RESTRICTED,
+        );
+      }
+      const patch: { statusOptions?: GroupOption[]; moodOptions?: GroupMoodOption[] } = {};
+      if (dto.statusOptions) {
+        g.statusOptions = resolveOptions(
+          dto.statusOptions,
+          g.statusOptions,
+          DEFAULT_STATUS_OPTIONS,
+          'status',
+        );
+        patch.statusOptions = g.statusOptions;
+      }
+      if (dto.moodOptions) {
+        g.moodOptions = resolveOptions(
+          dto.moodOptions,
+          g.moodOptions,
+          DEFAULT_MOOD_OPTIONS,
+          'mood',
+        ) as GroupMoodOption[];
+        patch.moodOptions = g.moodOptions;
+      }
+      // Diziler client'ta olduğu gibi değiştirilir — tam liste gönderilir
+      return { event: 'options.updated', patch };
     });
 
-    return mood;
+    return { statusOptions: updated.statusOptions, moodOptions: updated.moodOptions };
   }
 
-  async removeCustomMood(userId: string, groupId: string, moodId: string) {
-    const group = await this.assertAdmin(groupId, userId);
-
-    if (!group.customMoods.some((m) => m.id === moodId)) {
-      throw new NotFoundException('Mood bulunamadı');
-    }
-
-    await this.sessionService.mutateGroup(groupId, (g) => {
-      const index = g.customMoods.findIndex((m) => m.id === moodId);
-      // mutator transaction retry'ında tekrar çalışabilir — mood bu arada silinmiş olabilir
-      if (index === -1) throw new NotFoundException('Mood bulunamadı');
-      g.customMoods.splice(index, 1);
-      return {
-        event: 'mood.removed',
-        // Diziler client'ta olduğu gibi değiştirilir — tam liste gönderilir
-        patch: { customMoods: g.customMoods },
-      };
-    });
-
-    return { id: moodId, deleted: true };
-  }
-
-  async muteGroup(userId: string, groupId: string, isMuted: boolean) {
+  /**
+   * Üyenin bu grup için bildirim tercihlerini günceller. Yalnızca gönderilen
+   * alanlar değişir. Değişiklik session'a members.{uid} patch'i olarak yansır.
+   */
+  async updateNotificationPrefs(
+    userId: string,
+    groupId: string,
+    dto: UpdateNotificationsDto,
+  ): Promise<{ groupId: string; notifications: GroupNotificationPrefs }> {
     const group = await this.groupsRepository.findById(groupId);
     if (!group || !group.members[userId]) {
       throw new NotFoundException('Grup üyeliği bulunamadı');
     }
 
+    let resolved: GroupNotificationPrefs | null = null;
     await this.sessionService.mutateGroup(groupId, (g) => {
       const member = g.members[userId];
       if (!member) return;
-      member.isMuted = isMuted;
+
+      if (dto.enabled !== undefined) member.isMuted = !dto.enabled;
+
+      const current = resolveNotificationPrefs(member);
+      member.notificationPrefs = {
+        statusUpdates: dto.statusUpdates ?? current.statusUpdates,
+        moodUpdates: dto.moodUpdates ?? current.moodUpdates,
+        // Sessize alınanlar yalnızca hâlâ üye olanlarla sınırlı tutulur
+        mutedUserIds: (dto.mutedUserIds ?? current.mutedUserIds).filter(
+          (id) => id !== userId && !!g.members[id],
+        ),
+      };
+
+      resolved = resolveNotificationPrefs(member);
       return {
         event: 'group.updated',
-        patch: { members: { [userId]: { isMuted } } },
+        patch: {
+          members: {
+            [userId]: { isMuted: member.isMuted, notificationPrefs: member.notificationPrefs },
+          },
+        },
       };
     });
 
-    return { groupId, userId, isMuted };
+    return { groupId, notifications: resolved! };
+  }
+
+  /** Geriye dönük: eski mute ucu — enabled = !isMuted. */
+  async muteGroup(userId: string, groupId: string, isMuted: boolean) {
+    const result = await this.updateNotificationPrefs(userId, groupId, { enabled: !isMuted });
+    return { groupId, userId, isMuted: !result.notifications.enabled };
   }
 
   // ---------------------------------------------------------------
@@ -266,7 +318,17 @@ export class GroupsService {
       : PREMIUM_LIMITS.FREE.MAX_MEMBERSHIPS;
 
     if (currentCount >= limit) {
-      throw new ConflictException(ERROR_MESSAGES.PREMIUM.MAX_GROUPS_REACHED(currentCount, limit));
+      throw new PremiumLimitException(
+        'MEMBERSHIP_LIMIT',
+        ERROR_MESSAGES.PREMIUM.MAX_GROUPS_REACHED(currentCount, limit),
+        { limit, isPremium },
+      );
+    }
+  }
+
+  private assertNotPaused(group: GroupRecord) {
+    if (group.isPaused) {
+      throw new PremiumLimitException('GROUP_PAUSED', ERROR_MESSAGES.PREMIUM.GROUP_PAUSED);
     }
   }
 
@@ -276,7 +338,11 @@ export class GroupsService {
       : PREMIUM_LIMITS.FREE.MAX_GROUP_MEMBERS;
 
     if (Object.keys(group.members).length >= limit) {
-      throw new ConflictException(ERROR_MESSAGES.PREMIUM.MAX_MEMBERS_REACHED(limit));
+      throw new PremiumLimitException(
+        'GROUP_CAPACITY',
+        ERROR_MESSAGES.PREMIUM.MAX_MEMBERS_REACHED(limit),
+        { limit, isPremium: group.ownerIsPremium },
+      );
     }
   }
 
@@ -288,4 +354,70 @@ export class GroupsService {
     }
     return group;
   }
+}
+
+/**
+ * Gönderilen listeyi mevcut + varsayılan seçeneklere göre çözümler.
+ * Varsayılanlar metin/emoji değiştiremez; bilinmeyen id yeni özel seçenektir.
+ */
+function resolveOptions(
+  input: { id?: string; text: string; emoji?: string }[],
+  current: GroupOption[],
+  defaults: GroupOption[],
+  kind: 'status' | 'mood',
+): GroupOption[] {
+  const known = new Map<string, GroupOption>();
+  for (const o of [...defaults, ...current]) known.set(o.id, o);
+
+  const seenIds = new Set<string>();
+  const seenTexts = new Set<string>();
+  const result: GroupOption[] = [];
+
+  for (const item of input) {
+    const text = item.text.trim();
+    const existing = item.id ? known.get(item.id) : undefined;
+
+    let option: GroupOption;
+    if (existing?.isDefault) {
+      option = { ...existing };
+    } else if (existing) {
+      option = { ...existing, text, emoji: item.emoji || undefined };
+    } else {
+      const id = newOptionId(kind);
+      option = { id, text, emoji: item.emoji || undefined, isDefault: false };
+      if (kind === 'mood') {
+        (option as GroupMoodOption).key = `${slugify(text)}_${id.slice(-4)}`;
+      }
+    }
+
+    const textKey = option.text.toLocaleLowerCase('tr-TR');
+    if (seenIds.has(option.id) || seenTexts.has(textKey)) {
+      throw new BadRequestException(`"${option.text}" listede birden fazla kez var`);
+    }
+    seenIds.add(option.id);
+    seenTexts.add(textKey);
+    result.push(option);
+  }
+
+  const customCount = result.filter((o) => !o.isDefault).length;
+  if (customCount > MAX_CUSTOM_OPTIONS) {
+    throw new PremiumLimitException(
+      'OPTIONS_LIMIT',
+      ERROR_MESSAGES.PREMIUM.MAX_CUSTOM_OPTIONS(MAX_CUSTOM_OPTIONS),
+      { limit: MAX_CUSTOM_OPTIONS },
+    );
+  }
+  return result;
+}
+
+function slugify(text: string): string {
+  const map: Record<string, string> = { ç: 'c', ğ: 'g', ı: 'i', ö: 'o', ş: 's', ü: 'u' };
+  return (
+    text
+      .toLocaleLowerCase('tr-TR')
+      .replace(/[çğıöşü]/g, (c) => map[c] ?? c)
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '')
+      .slice(0, 24) || 'mood'
+  );
 }

@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { FieldValue, Firestore } from 'firebase-admin/firestore';
 import {
   COLLECTIONS,
@@ -11,16 +11,22 @@ import {
   JoinRequestRecord,
   JoinRequestStatus,
   nowIso,
+  UserDoc,
   UserRecord,
 } from '../firebase/firestore.types';
 import { SessionService } from '../session/session.service';
+import { ERROR_MESSAGES, PREMIUM_LIMITS } from '../common/constants/premium.constants';
+import { PremiumLimitException } from '../common/exceptions/premium-limit.exception';
+import { UsersRepository } from '../users/users.repository';
 import { generateInviteCode } from './helpers/invite-code.generator';
+import { defaultMoodOptions, defaultStatusOptions } from '../common/group-options';
 
 @Injectable()
 export class GroupsRepository {
   constructor(
     @Inject('FIRESTORE') private readonly db: Firestore,
     private readonly sessionService: SessionService,
+    private readonly usersRepository: UsersRepository,
   ) {}
 
   private groupRef(groupId: string) {
@@ -71,18 +77,39 @@ export class GroupsRepository {
           },
         },
         statuses: {},
-        customMoods: [],
+        statusOptions: defaultStatusOptions(),
+        moodOptions: defaultMoodOptions(),
+        isPaused: false,
         createdAt: now,
         updatedAt: now,
       };
 
       try {
         await this.db.runTransaction(async (tx) => {
+          // Üyelik limiti transaction içinde, güncel kullanıcı dokümanıyla
+          // kontrol edilir — paralel "oluştur" istekleri limiti aşamaz
+          const userRef = this.db.collection(COLLECTIONS.USERS).doc(data.owner.id);
+          const userSnap = await tx.get(userRef);
+          const owner = userSnap.data() as UserDoc | undefined;
+          if (!owner) throw new NotFoundException('Kullanıcı bulunamadı');
+          const limit = owner.isPremium
+            ? PREMIUM_LIMITS.PREMIUM.MAX_MEMBERSHIPS
+            : PREMIUM_LIMITS.FREE.MAX_MEMBERSHIPS;
+          if (owner.groupIds.length >= limit) {
+            throw new PremiumLimitException(
+              'MEMBERSHIP_LIMIT',
+              ERROR_MESSAGES.PREMIUM.MAX_GROUPS_REACHED(owner.groupIds.length, limit),
+              { limit, isPremium: owner.isPremium },
+            );
+          }
+          // Premium durumu güncel dokümandan (webhook sonrası taze)
+          doc.ownerIsPremium = owner.isPremium;
+
           tx.create(this.db.collection(COLLECTIONS.INVITE_CODES).doc(inviteCode), {
             groupId: groupRef.id,
           });
           tx.create(groupRef, doc);
-          tx.update(this.db.collection(COLLECTIONS.USERS).doc(data.owner.id), {
+          tx.update(userRef, {
             groupIds: FieldValue.arrayUnion(groupRef.id),
             updatedAt: now,
           });
@@ -97,7 +124,13 @@ export class GroupsRepository {
     throw new Error(`Failed to generate unique invite code after ${maxAttempts} attempts`);
   }
 
-  /** Üyeyi grup dokümanına ve kullanıcının groupIds listesine ekler. */
+  /**
+   * Üyeyi grup dokümanına ve kullanıcının groupIds listesine ekler.
+   *
+   * Kapasite kontrolü mutator İÇİNDE yapılır: dışarıda okunan grup ile
+   * yazma anı arasında başka bir katılım olabilir (iki eş zamanlı onay).
+   * Kapasite hesabı grubun o anki premium durumuna göre yapılır.
+   */
   async addMember(groupId: string, user: UserRecord, role: GroupRole = 'MEMBER') {
     const entry: GroupMemberEntry = {
       role,
@@ -108,18 +141,35 @@ export class GroupsRepository {
       joinedAt: nowIso(),
     };
 
-    await this.sessionService.mutateGroup(groupId, (group) => {
-      group.members[user.id] = entry;
-      return {
-        event: 'member.joined',
-        patch: { members: { [user.id]: entry } },
-      };
-    });
+    // 1) Kullanıcının üyelik slotunu atomik ayır (üyelik limiti burada)
+    await this.usersRepository.reserveMembership(user.id, groupId);
 
-    await this.db.collection(COLLECTIONS.USERS).doc(user.id).update({
-      groupIds: FieldValue.arrayUnion(groupId),
-      updatedAt: nowIso(),
-    });
+    // 2) Grup kapasitesini mutator içinde uygula; başarısızsa slotu geri ver
+    try {
+      await this.sessionService.mutateGroup(groupId, (group) => {
+        if (group.members[user.id]) {
+          throw new ConflictException(ERROR_MESSAGES.GROUP.ALREADY_MEMBER);
+        }
+        const limit = group.ownerIsPremium
+          ? PREMIUM_LIMITS.PREMIUM.MAX_GROUP_MEMBERS
+          : PREMIUM_LIMITS.FREE.MAX_GROUP_MEMBERS;
+        if (Object.keys(group.members).length >= limit) {
+          throw new PremiumLimitException(
+            'GROUP_CAPACITY',
+            ERROR_MESSAGES.PREMIUM.MAX_MEMBERS_REACHED(limit),
+            { limit, isPremium: group.ownerIsPremium },
+          );
+        }
+        group.members[user.id] = entry;
+        return {
+          event: 'member.joined',
+          patch: { members: { [user.id]: entry } },
+        };
+      });
+    } catch (error) {
+      await this.usersRepository.removeGroupFromUser(user.id, groupId).catch(() => undefined);
+      throw error;
+    }
 
     return { groupId, userId: user.id, ...entry };
   }
@@ -135,10 +185,13 @@ export class GroupsRepository {
       };
     });
 
-    await this.db.collection(COLLECTIONS.USERS).doc(userId).update({
-      groupIds: FieldValue.arrayRemove(groupId),
-      updatedAt: nowIso(),
-    });
+    await this.db
+      .collection(COLLECTIONS.USERS)
+      .doc(userId)
+      .update({
+        groupIds: FieldValue.arrayRemove(groupId),
+        updatedAt: nowIso(),
+      });
 
     return { groupId, userId };
   }

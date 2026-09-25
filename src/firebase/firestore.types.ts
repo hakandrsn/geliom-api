@@ -11,6 +11,7 @@ export const COLLECTIONS = {
   INVITE_CODES: 'inviteCodes',
   CUSTOM_IDS: 'customIds',
   JOIN_REQUESTS: 'joinRequests', // groups/{id} alt koleksiyonu
+  SUPPORT_MESSAGES: 'supportMessages',
 } as const;
 
 export type GroupRole = 'ADMIN' | 'MEMBER';
@@ -25,6 +26,13 @@ export interface UserDoc {
   isPremium: boolean;
   subscriptionStatus: string | null;
   groupIds: string[];
+  /** Uygulama içi genel bildirim tercihi (varsayılan açık). Sistem izni ayrı. */
+  pushEnabled?: boolean;
+  /** Premium'un bittiği an (yenilenince silinir) */
+  premiumLapsedAt?: string | null;
+  /** "Aboneliğin yenilenmedi" hatırlatmasının gönderileceği an */
+  lapseReminderDueAt?: string | null;
+  lapseReminderSentAt?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -33,22 +41,48 @@ export interface UserRecord extends UserDoc {
   id: string;
 }
 
+/** Üyenin bu grup için ince bildirim tercihleri; yoksa hepsi açık sayılır. */
+export interface MemberNotificationPrefs {
+  statusUpdates: boolean;
+  moodUpdates: boolean;
+  mutedUserIds: string[];
+}
+
 export interface GroupMemberEntry {
   role: GroupRole;
   displayName: string | null;
   photoUrl: string | null;
   customId: string;
+  /** Grup bildirimleri tamamen kapalı (enabled = !isMuted) */
   isMuted: boolean;
+  notificationPrefs?: MemberNotificationPrefs;
   joinedAt: string;
 }
 
 export interface StatusEntry {
-  text: string;
+  /** Durum metni ("İşte"). Ruh hali tek başına paylaşılabildiği için opsiyonel. */
+  text?: string;
   emoji?: string;
+  /** Ruh hali anahtarı ("happy" veya custom mood key'i) */
   mood?: string;
   updatedAt: string;
 }
 
+/** Grubun seçilebilir durum seçeneği. Varsayılanlar da listede tutulur (sahip silebilir). */
+export interface GroupOption {
+  id: string;
+  text: string;
+  emoji?: string;
+  /** Uygulamanın hazır seçeneği mi (metni değiştirilemez) */
+  isDefault: boolean;
+}
+
+/** Ruh hali seçeneği — status kaydında `key` saklanır. */
+export interface GroupMoodOption extends GroupOption {
+  key: string;
+}
+
+/** @deprecated Eski model — normalizeGroupDoc ile moodOptions'a taşınır. */
 export interface CustomMood {
   id: string;
   text: string;
@@ -67,7 +101,18 @@ export interface GroupDoc {
   version: number;
   members: Record<string, GroupMemberEntry>;
   statuses: Record<string, StatusEntry>;
-  customMoods: CustomMood[];
+  /** Grubun durum seçenekleri, sahibinin belirlediği sırada */
+  statusOptions: GroupOption[];
+  /** Grubun ruh hali seçenekleri, sahibinin belirlediği sırada */
+  moodOptions: GroupMoodOption[];
+  /**
+   * Sahibinin aboneliği bittiği için grup duraklatıldı: canlı session,
+   * bildirim ve üye etkileşimi kapalı; grup yalnızca anlık görüntü olarak okunur.
+   */
+  isPaused: boolean;
+  pausedAt?: string | null;
+  /** @deprecated Eski özel mood listesi — okunurken moodOptions'a taşınır */
+  customMoods?: CustomMood[];
   createdAt: string;
   updatedAt: string;
 }

@@ -5,6 +5,7 @@ import { UserRecord } from '../firebase/firestore.types';
 import { SessionService } from '../session/session.service';
 import { UsersRepository } from './users.repository';
 import { generateUniqueCustomId } from './helpers/custom-id.generator';
+import { resolveNotificationPrefs } from '../common/notification-prefs';
 
 @Injectable()
 export class UsersService {
@@ -50,7 +51,15 @@ export class UsersService {
         this.logger.info({ userId: data.id, customId }, 'Creating new user');
         return await this.usersRepository.create({ ...data, customId });
       } catch (error) {
-        if (error.code === 6 /* ALREADY_EXISTS */ && attempt < maxAttempts - 1) continue;
+        if (error.code !== 6 /* ALREADY_EXISTS */) throw error;
+
+        // İlk girişte mobil birden fazla isteği paralel atabilir (GET /users/me +
+        // PATCH /users/me gibi); ikinci istek kullanıcıyı oluşturulmuş bulur.
+        const existing = await this.usersRepository.findById(data.id);
+        if (existing) return existing;
+
+        // Kullanıcı yoksa çakışan customId'dir — yeni ID ile tekrar dene
+        if (attempt < maxAttempts - 1) continue;
         throw error;
       }
     }
@@ -59,9 +68,11 @@ export class UsersService {
 
   async update(
     id: string,
-    data: { displayName?: string; photoUrl?: string },
+    data: { displayName?: string; photoUrl?: string | null; pushEnabled?: boolean },
   ): Promise<UserRecord> {
     const user = await this.usersRepository.update(id, data);
+    // Yalnızca bildirim tercihi değiştiyse gruplara yayın gereksiz
+    if (data.displayName === undefined && data.photoUrl === undefined) return user;
 
     // Gruplardaki denormalize üye bilgisini tazele
     for (const groupId of user.groupIds) {
@@ -104,6 +115,11 @@ export class UsersService {
         inviteCode: group.inviteCode,
         ownerId: group.ownerId,
         role: group.members[userId]?.role ?? 'MEMBER',
+        notifications: group.members[userId]
+          ? resolveNotificationPrefs(group.members[userId])
+          : null,
+        isPaused: group.isPaused,
+        ownerIsPremium: group.ownerIsPremium,
         memberCount: Object.keys(group.members).length,
         joinedAt: group.members[userId]?.joinedAt ?? null,
       }));

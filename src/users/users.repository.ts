@@ -1,12 +1,8 @@
-import { ConflictException, Inject, Injectable } from '@nestjs/common';
+import { ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { ERROR_MESSAGES, PREMIUM_LIMITS } from '../common/constants/premium.constants';
+import { PremiumLimitException } from '../common/exceptions/premium-limit.exception';
 import { FieldValue, Firestore } from 'firebase-admin/firestore';
-import {
-  COLLECTIONS,
-  CustomIdDoc,
-  nowIso,
-  UserDoc,
-  UserRecord,
-} from '../firebase/firestore.types';
+import { COLLECTIONS, CustomIdDoc, nowIso, UserDoc, UserRecord } from '../firebase/firestore.types';
 
 @Injectable()
 export class UsersRepository {
@@ -69,12 +65,21 @@ export class UsersRepository {
 
   async update(
     id: string,
-    data: Partial<Pick<UserDoc, 'displayName' | 'photoUrl' | 'isPremium' | 'subscriptionStatus'>>,
+    data: Partial<
+      Pick<UserDoc, 'displayName' | 'photoUrl' | 'isPremium' | 'subscriptionStatus' | 'pushEnabled'>
+    >,
   ): Promise<UserRecord> {
     await this.userRef(id).update({ ...data, updatedAt: nowIso() });
     const user = await this.findById(id);
     if (!user) throw new ConflictException('Kullanıcı güncellenemedi');
     return user;
+  }
+
+  async updateLapseState(
+    id: string,
+    data: Partial<Pick<UserDoc, 'premiumLapsedAt' | 'lapseReminderDueAt' | 'lapseReminderSentAt'>>,
+  ): Promise<void> {
+    await this.userRef(id).update({ ...data, updatedAt: nowIso() });
   }
 
   /** Kullanıcı dokümanını ve customIds lookup'ını siler. */
@@ -83,6 +88,33 @@ export class UsersRepository {
     batch.delete(this.db.collection(COLLECTIONS.CUSTOM_IDS).doc(user.customId));
     batch.delete(this.userRef(user.id));
     await batch.commit();
+  }
+
+  /**
+   * Üyelik limitini ATOMİK olarak kontrol edip groupIds'e ekler. Okuma ve
+   * yazma aynı transaction'da olduğu için paralel katılım/oluşturma istekleri
+   * limiti aşamaz. Zaten üyeyse no-op.
+   */
+  async reserveMembership(userId: string, groupId: string): Promise<void> {
+    await this.db.runTransaction(async (tx) => {
+      const ref = this.userRef(userId);
+      const snap = await tx.get(ref);
+      if (!snap.exists) throw new NotFoundException('Kullanıcı bulunamadı');
+      const user = snap.data() as UserDoc;
+      if (user.groupIds.includes(groupId)) return;
+
+      const limit = user.isPremium
+        ? PREMIUM_LIMITS.PREMIUM.MAX_MEMBERSHIPS
+        : PREMIUM_LIMITS.FREE.MAX_MEMBERSHIPS;
+      if (user.groupIds.length >= limit) {
+        throw new PremiumLimitException(
+          'MEMBERSHIP_LIMIT',
+          ERROR_MESSAGES.PREMIUM.MAX_GROUPS_REACHED(user.groupIds.length, limit),
+          { limit, isPremium: user.isPremium },
+        );
+      }
+      tx.update(ref, { groupIds: FieldValue.arrayUnion(groupId), updatedAt: nowIso() });
+    });
   }
 
   async addGroupToUser(userId: string, groupId: string): Promise<void> {

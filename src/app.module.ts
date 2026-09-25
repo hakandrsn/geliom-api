@@ -8,9 +8,11 @@ import { UsersModule } from './users/users.module';
 import { GroupsModule } from './groups/groups.module';
 import { SessionModule } from './session/session.module';
 import { AdaptyModule } from './adapty/adapty.module';
+import { SupportModule } from './support/support.module';
 import { FirebaseAuthGuard } from './common/guards/firebase-auth.guard';
 import { FirebaseModule } from './firebase/firebase.module';
 import { NotificationsModule } from './notifications/notifications.module';
+import { RateLimitGuard } from './rate-limit/rate-limit.guard';
 
 @Module({
   imports: [
@@ -32,12 +34,19 @@ import { NotificationsModule } from './notifications/notifications.module';
     UsersModule,
     GroupsModule,
     AdaptyModule,
+    SupportModule,
   ],
   providers: [
-    // Global Firebase Guard - tüm endpoint'ler korunur, @Public() ile açılır
+    // Global guard sırası önemlidir: önce auth (request.user set edilir),
+    // sonra rate limit (kullanıcı bazlı anahtar için request.user gerekir).
+    // @Public() endpoint'lerde auth atlanır, rate limit IP bazlı çalışır.
     {
       provide: APP_GUARD,
       useClass: FirebaseAuthGuard,
+    },
+    {
+      provide: APP_GUARD,
+      useClass: RateLimitGuard,
     },
   ],
 })

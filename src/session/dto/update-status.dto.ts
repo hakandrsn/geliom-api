@@ -1,5 +1,5 @@
 export interface UpdateStatusPayload {
-  text: string;
+  text?: string;
   emoji?: string;
   mood?: string;
 }
@@ -7,6 +7,9 @@ export interface UpdateStatusPayload {
 /**
  * Socket payload doğrulaması — HTTP ValidationPipe socket handler'larında
  * çalışmadığı için elle yapılır. Hata mesajı ack ile client'a döner.
+ *
+ * Durum metni ve ruh hali birbirinden bağımsızdır: ikisinden en az biri
+ * gönderilmelidir. Boş metin "metin yok" sayılır.
  */
 export function validateStatusPayload(payload: unknown): UpdateStatusPayload {
   if (!payload || typeof payload !== 'object') {
@@ -14,22 +17,30 @@ export function validateStatusPayload(payload: unknown): UpdateStatusPayload {
   }
   const { text, emoji, mood } = payload as Record<string, unknown>;
 
-  if (typeof text !== 'string' || text.trim().length === 0) {
-    throw new Error('text zorunludur');
+  let cleanText: string | undefined;
+  if (text !== undefined && text !== null) {
+    if (typeof text !== 'string') throw new Error('text geçersiz');
+    if (text.length > 200) throw new Error('text en fazla 200 karakter olabilir');
+    cleanText = text.trim() || undefined;
   }
-  if (text.length > 200) {
-    throw new Error('text en fazla 200 karakter olabilir');
+
+  let cleanMood: string | undefined;
+  if (mood !== undefined && mood !== null) {
+    if (typeof mood !== 'string' || mood.length > 50) throw new Error('mood geçersiz');
+    cleanMood = mood.trim() || undefined;
   }
-  if (emoji !== undefined && (typeof emoji !== 'string' || emoji.length > 16)) {
+
+  if (!cleanText && !cleanMood) {
+    throw new Error('text veya mood zorunludur');
+  }
+
+  if (emoji !== undefined && emoji !== null && (typeof emoji !== 'string' || emoji.length > 16)) {
     throw new Error('emoji geçersiz');
-  }
-  if (mood !== undefined && (typeof mood !== 'string' || mood.length > 50)) {
-    throw new Error('mood geçersiz');
   }
 
   return {
-    text: text.trim(),
-    emoji: emoji as string | undefined,
-    mood: mood as string | undefined,
+    text: cleanText,
+    emoji: (emoji as string | undefined) || undefined,
+    mood: cleanMood,
   };
 }

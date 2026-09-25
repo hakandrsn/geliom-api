@@ -41,7 +41,7 @@ import { ConfigService } from '@nestjs/config';
             autoLogging: {
               ignore: (req) => {
                 // Health check endpoint'lerini loglamayı atla
-                return req.url === '/api/health' || req.url === '/health';
+                return req.url === '/api/auth/health' || req.url === '/health';
               },
             },
           },

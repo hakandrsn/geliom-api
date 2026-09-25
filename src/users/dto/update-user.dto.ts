@@ -1,4 +1,4 @@
-import { IsNotEmpty, IsOptional, IsString, MaxLength } from 'class-validator';
+import { IsBoolean, IsNotEmpty, IsOptional, IsString, Matches, MaxLength } from 'class-validator';
 import { Transform } from 'class-transformer';
 import { ApiPropertyOptional } from '@nestjs/swagger';
 
@@ -11,9 +11,21 @@ export class UpdateUserDto {
   @MaxLength(100)
   displayName?: string;
 
-  @ApiPropertyOptional({ description: 'Profile photo URL' })
+  @ApiPropertyOptional({
+    description:
+      'Avatar: "avatar:<key>" (uygulamaya gömülü karakter), "tint:<0-7>" (baş harf tonu), https URL; null = kaldır',
+    nullable: true,
+  })
   @IsOptional()
   @IsString()
   @MaxLength(2048)
-  photoUrl?: string;
+  @Matches(/^(avatar:[a-z0-9-]{1,40}|tint:[0-7]|https:\/\/\S+)$/, {
+    message: 'Geçersiz avatar değeri',
+  })
+  photoUrl?: string | null;
+
+  @ApiPropertyOptional({ description: 'Uygulama içi genel bildirim tercihi' })
+  @IsOptional()
+  @IsBoolean()
+  pushEnabled?: boolean;
 }

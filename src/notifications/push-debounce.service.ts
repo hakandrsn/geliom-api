@@ -1,11 +1,14 @@
 import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import { PinoLogger } from 'nestjs-pino';
-import { NOTIFICATION_RULES } from '../common/constants/premium.constants';
+import { DEFAULT_MOOD_LABELS, NOTIFICATION_RULES } from '../common/constants/premium.constants';
 import { SessionService } from '../session/session.service';
 import { NotificationsService } from './notifications.service';
+import { shouldNotifyMember, StatusChangeFlags } from '../common/notification-prefs';
 
 interface DebounceEntry {
   timer: NodeJS.Timeout;
+  /** Pencere boyunca biriken değişiklik türleri (OR) */
+  flags: StatusChangeFlags;
 }
 
 /**
@@ -30,23 +33,29 @@ export class PushDebounceService implements OnModuleDestroy {
   }
 
   /** Status değişiminde çağrılır; debounce süresi dolunca push atar. */
-  notifyStatusChanged(groupId: string, senderId: string) {
+  notifyStatusChanged(groupId: string, senderId: string, flags: StatusChangeFlags) {
     const key = `${groupId}:${senderId}`;
     const existing = this.entries.get(key);
     if (existing) clearTimeout(existing.timer);
 
+    const merged: StatusChangeFlags = {
+      status: (existing?.flags.status ?? false) || flags.status,
+      mood: (existing?.flags.mood ?? false) || flags.mood,
+    };
+
     const timer = setTimeout(() => {
+      const entry = this.entries.get(key);
       this.entries.delete(key);
-      void this.fire(groupId, senderId);
+      void this.fire(groupId, senderId, entry?.flags ?? merged);
     }, NOTIFICATION_RULES.STATUS_UPDATE_DEBOUNCE_MS);
 
-    this.entries.set(key, { timer });
+    this.entries.set(key, { timer, flags: merged });
   }
 
-  private async fire(groupId: string, senderId: string) {
+  private async fire(groupId: string, senderId: string, flags: StatusChangeFlags) {
     try {
       const group = await this.sessionService.getGroup(groupId);
-      if (!group) return;
+      if (!group || group.isPaused) return; // duraklatılmış grupta bildirim yok
 
       const status = group.statuses[senderId];
       const sender = group.members[senderId];
@@ -56,7 +65,7 @@ export class PushDebounceService implements OnModuleDestroy {
         .filter(
           ([userId, member]) =>
             userId !== senderId &&
-            !member.isMuted &&
+            shouldNotifyMember(member, senderId, flags) &&
             !this.sessionService.isUserInSession(groupId, userId),
         )
         .map(([userId]) => userId);
@@ -64,14 +73,21 @@ export class PushDebounceService implements OnModuleDestroy {
       if (targetUserIds.length === 0) return;
 
       const senderName = sender.displayName || 'Bir üye';
-      const message = `${senderName}: ${status.text}${status.emoji ? ` ${status.emoji}` : ''}`;
+      const moodLabel = status.mood
+        ? (group.moodOptions.find((m) => m.key === status.mood)?.text ??
+          DEFAULT_MOOD_LABELS[status.mood] ??
+          status.mood.replace(/[_-]+/g, ' '))
+        : undefined;
+      // "İşte · Yorgun", yalnızca biri varsa o
+      const body = [status.text, moodLabel].filter(Boolean).join(' · ');
+      if (!body) return;
+      const message = `${senderName}: ${body}${status.emoji ? ` ${status.emoji}` : ''}`;
 
-      await this.notificationsService.sendNotificationToUsers(
-        targetUserIds,
-        group.name,
-        message,
-        { type: 'status_update', groupId, userId: senderId },
-      );
+      await this.notificationsService.sendNotificationToUsers(targetUserIds, group.name, message, {
+        type: 'status_update',
+        groupId,
+        userId: senderId,
+      });
     } catch (error) {
       this.logger.error({ groupId, senderId, err: error }, 'Failed to send debounced push');
     }

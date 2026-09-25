@@ -13,6 +13,7 @@ import { Server, Socket } from 'socket.io';
 import * as admin from 'firebase-admin';
 import { nowIso, StatusEntry } from '../firebase/firestore.types';
 import { PushDebounceService } from '../notifications/push-debounce.service';
+import { StatusChangeFlags } from '../common/notification-prefs';
 import { validateStatusPayload } from './dto/update-status.dto';
 import { SessionService } from './session.service';
 import { SESSION_EVENTS } from './session.types';
@@ -135,8 +136,13 @@ export class SessionGateway implements OnGatewayInit, OnGatewayConnection, OnGat
       updatedAt: nowIso(),
     };
 
+    // Neyin değiştiği push filtrelerinde kullanılır (durum mu, ruh hali mi)
+    const flags: StatusChangeFlags = { status: false, mood: false };
     try {
       await this.sessionService.mutateGroup(groupId, (group) => {
+        const prev = group.statuses[userId];
+        flags.status = prev?.text !== entry.text;
+        flags.mood = prev?.mood !== entry.mood || prev?.emoji !== entry.emoji;
         group.statuses[userId] = entry;
         return {
           event: 'status.updated',
@@ -147,9 +153,39 @@ export class SessionGateway implements OnGatewayInit, OnGatewayConnection, OnGat
       return { ok: false, error: error.message || 'Status güncellenemedi' };
     }
 
-    this.pushDebounceService.notifyStatusChanged(groupId, userId);
+    if (flags.status || flags.mood) {
+      this.pushDebounceService.notifyStatusChanged(groupId, userId, flags);
+    }
 
     return { ok: true, status: entry };
+  }
+
+  /** Kullanıcının durumunu tamamen kaldırır (statuses.{uid} silinir). */
+  @SubscribeMessage(SESSION_EVENTS.STATUS_CLEAR)
+  async onStatusClear(@ConnectedSocket() client: Socket): Promise<Ack> {
+    const userId = client.data.userId as string | undefined;
+    if (!userId) return { ok: false, error: 'Unauthorized' };
+
+    if (!this.checkStatusRate(client)) {
+      return { ok: false, error: 'Çok fazla istek. Lütfen yavaşlayın.' };
+    }
+
+    const groupId = this.sessionService.getActiveGroupId(userId);
+    if (!groupId) {
+      return { ok: false, error: 'Aktif bir session yok. Önce session:open gönderin.' };
+    }
+
+    try {
+      await this.sessionService.mutateGroup(groupId, (group) => {
+        if (!group.statuses[userId]) return; // zaten yok — yayın gereksiz
+        delete group.statuses[userId];
+        return { event: 'status.cleared', removed: [`statuses.${userId}`] };
+      });
+    } catch (error) {
+      return { ok: false, error: error.message || 'Status kaldırılamadı' };
+    }
+
+    return { ok: true };
   }
 
   private checkStatusRate(client: Socket): boolean {

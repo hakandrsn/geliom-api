@@ -2,12 +2,14 @@ import { Injectable } from '@nestjs/common';
 import { PinoLogger } from 'nestjs-pino';
 import { SessionService } from '../session/session.service';
 import { UsersRepository } from '../users/users.repository';
+import { GroupPlanService } from '../groups/group-plan.service';
 
 const PREMIUM_ON_EVENTS = new Set([
   'subscription_started',
   'subscription_renewed',
-  'access_level_updated',
   'trial_started',
+  'trial_converted',
+  'non_subscription_purchase',
 ]);
 
 const PREMIUM_OFF_EVENTS = new Set([
@@ -15,12 +17,35 @@ const PREMIUM_OFF_EVENTS = new Set([
   'subscription_refunded',
   'access_revoked',
   'trial_expired',
+  'subscription_paused',
+  'non_subscription_purchase_refunded',
 ]);
 
 export interface AdaptyWebhookPayload {
   event_type?: string;
   customer_user_id?: string;
+  event_properties?: Record<string, unknown>;
   [key: string]: unknown;
+}
+
+/**
+ * `access_level_updated` hem erişim kazanıldığında hem kaybedildiğinde gelir;
+ * event tipinden değil, payload'daki erişim bilgisinden karar verilir.
+ * Karar verilemezse null döner ve event yok sayılır.
+ */
+function resolveAccessLevelActive(props: Record<string, unknown> | undefined): boolean | null {
+  if (!props) return null;
+
+  if (typeof props.is_active === 'boolean') return props.is_active;
+  if (props.is_lifetime === true) return true;
+
+  const expiresAt = props.expires_at ?? props.access_level_expires_at;
+  if (typeof expiresAt === 'string') {
+    const ts = Date.parse(expiresAt);
+    if (!Number.isNaN(ts)) return ts > Date.now();
+  }
+
+  return null;
 }
 
 @Injectable()
@@ -28,6 +53,7 @@ export class AdaptyService {
   constructor(
     private readonly usersRepository: UsersRepository,
     private readonly sessionService: SessionService,
+    private readonly groupPlanService: GroupPlanService,
     private readonly logger: PinoLogger,
   ) {
     this.logger.setContext(AdaptyService.name);
@@ -47,6 +73,16 @@ export class AdaptyService {
       isPremium = true;
     } else if (PREMIUM_OFF_EVENTS.has(eventType)) {
       isPremium = false;
+    } else if (eventType === 'access_level_updated') {
+      const active = resolveAccessLevelActive(payload.event_properties);
+      if (active === null) {
+        this.logger.warn(
+          { userId, props: payload.event_properties },
+          'access_level_updated without resolvable access state — ignored',
+        );
+        return;
+      }
+      isPremium = active;
     } else {
       this.logger.debug({ eventType }, 'Ignoring unhandled Adapty event');
       return;
@@ -67,22 +103,9 @@ export class AdaptyService {
     await this.usersRepository.update(userId, { isPremium, subscriptionStatus: eventType });
     this.logger.info({ userId, isPremium, eventType }, 'User premium status changed');
 
-    // Owner olduğu gruplarda denormalize ownerIsPremium'u tazele —
-    // canlı session'lar premium.changed olarak anında görür
-    for (const groupId of user.groupIds) {
-      try {
-        await this.sessionService.mutateGroup(groupId, (group) => {
-          if (group.ownerId !== userId) return;
-          group.ownerIsPremium = isPremium;
-          return {
-            event: 'premium.changed',
-            patch: { ownerIsPremium: isPremium },
-          };
-        });
-      } catch (error) {
-        this.logger.warn({ groupId, err: error }, 'Failed to fan out premium change to group');
-      }
-    }
+    // Sahibi olduğu gruplar: ownerIsPremium tazelenir; premium bittiyse
+    // ücretsiz hak dışındaki gruplar duraklatılır, açıldıysa aktifleşir
+    await this.groupPlanService.applyOwnerPremium(userId, isPremium);
 
     // Kullanıcının kendi soketlerine anlık bildir
     this.sessionService.emitToUser(userId, 'premium:update', { isPremium });
