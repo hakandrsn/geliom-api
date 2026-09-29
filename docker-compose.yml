@@ -14,21 +14,23 @@ services:
     container_name: geliom-api
     restart: unless-stopped
     ports:
-      - '3000:3000'
+      - '3045:3045'
     env_file:
       - .env
     environment:
-      NODE_ENV: development
-      PORT: 3000
+      NODE_ENV: production
+      PORT: 3045
+      FIREBASE_SERVICE_ACCOUNT_PATH: /app/firebase-service-account.json
     volumes:
-      # Firebase service account dosyasını konteynere bağla
-      - ./firebase-service-account.json:/app/firebase-service-account.json:ro
+      - ./geliom-8d06f-firebase-adminsdk-fbsvc-00dc3c2155.json:/app/firebase-service-account.json:ro
+    networks: [ae-network]
     healthcheck:
-      test: ['CMD', 'wget', '--no-verbose', '--tries=1', '--spider', 'http://localhost:3000/api/auth/health']
+      test: ['CMD', 'wget', '--no-verbose', '--tries=1', '--spider', 'http://localhost:3045/api/auth/health']
       interval: 30s
       timeout: 3s
       retries: 3
 
+
 networks:
-  default:
-    name: geliom-network
+  ae-network:
+    external: true
