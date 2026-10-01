@@ -41,6 +41,9 @@ RUN npm ci --only=production && \
 # Copy built application from builder
 COPY --from=builder /app/dist ./dist
 
+# Emoji görselleri (main.ts → /api/static/emoji)
+COPY --from=builder /app/assets ./assets
+
 # Set ownership
 RUN chown -R nestjs:nodejs /app
 

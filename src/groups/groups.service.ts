@@ -19,6 +19,7 @@ import { PremiumLimitException } from '../common/exceptions/premium-limit.except
 import { GroupsRepository } from './groups.repository';
 import { UpdateNotificationsDto, UpdateOptionsDto } from './dto';
 import { GroupNotificationPrefs, resolveNotificationPrefs } from '../common/notification-prefs';
+import { isCatalogEmoji } from '../emoji/emoji';
 
 @Injectable()
 export class GroupsService {
@@ -376,6 +377,12 @@ function resolveOptions(
   for (const item of input) {
     const text = item.text.trim();
     const existing = item.id ? known.get(item.id) : undefined;
+
+    // Yeni seçilen emoji ortak katalogdan olmalı; eski kayıtlardaki
+    // katalog dışı emojiler değişmedikçe korunur.
+    if (item.emoji && item.emoji !== existing?.emoji && !isCatalogEmoji(item.emoji)) {
+      throw new BadRequestException(`"${text}" için seçilen emoji desteklenmiyor`);
+    }
 
     let option: GroupOption;
     if (existing?.isDefault) {

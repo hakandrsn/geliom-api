@@ -9,6 +9,7 @@ import { GroupsModule } from './groups/groups.module';
 import { SessionModule } from './session/session.module';
 import { AdaptyModule } from './adapty/adapty.module';
 import { SupportModule } from './support/support.module';
+import { EmojiModule } from './emoji/emoji.module';
 import { FirebaseAuthGuard } from './common/guards/firebase-auth.guard';
 import { FirebaseModule } from './firebase/firebase.module';
 import { NotificationsModule } from './notifications/notifications.module';
@@ -35,6 +36,7 @@ import { RateLimitGuard } from './rate-limit/rate-limit.guard';
     GroupsModule,
     AdaptyModule,
     SupportModule,
+    EmojiModule,
   ],
   providers: [
     // Global guard sırası önemlidir: önce auth (request.user set edilir),
