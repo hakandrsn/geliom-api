@@ -26,6 +26,22 @@ export class GroupPlanService {
     this.logger.setContext(GroupPlanService.name);
   }
 
+  /**
+   * Sahibi olduğu gruplardan biri kullanıcının premium durumundan kopmuş mu
+   * (ownerIsPremium farklı, ya da premium iken duraklatılmış grup var).
+   */
+  async hasOwnerPremiumDrift(userId: string, isPremium: boolean): Promise<boolean> {
+    const user = await this.usersRepository.findById(userId);
+    if (!user) return false;
+    for (const groupId of user.groupIds) {
+      const group = await this.sessionService.getGroup(groupId);
+      if (!group || group.ownerId !== userId) continue;
+      if (group.ownerIsPremium !== isPremium) return true;
+      if (isPremium && group.isPaused) return true;
+    }
+    return false;
+  }
+
   async applyOwnerPremium(userId: string, isPremium: boolean): Promise<void> {
     const user = await this.usersRepository.findById(userId);
     if (!user) return;

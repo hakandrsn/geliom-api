@@ -75,8 +75,7 @@ export class PushDebounceService implements OnModuleDestroy {
       const senderName = sender.displayName || 'Bir üye';
       const moodLabel = status.mood
         ? (group.moodOptions.find((m) => m.key === status.mood)?.text ??
-          DEFAULT_MOOD_LABELS[status.mood] ??
-          status.mood.replace(/[_-]+/g, ' '))
+          DEFAULT_MOOD_LABELS[status.mood])
         : undefined;
       // "İşte · Yorgun", yalnızca biri varsa o
       const body = [status.text, moodLabel].filter(Boolean).join(' · ');

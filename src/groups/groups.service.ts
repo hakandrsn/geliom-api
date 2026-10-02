@@ -8,7 +8,7 @@ import { GroupMoodOption, GroupOption, GroupRecord, nowIso } from '../firebase/f
 import {
   DEFAULT_MOOD_OPTIONS,
   DEFAULT_STATUS_OPTIONS,
-  MAX_CUSTOM_OPTIONS,
+  MAX_OPTIONS,
   newOptionId,
 } from '../common/group-options';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -17,6 +17,7 @@ import { UsersService } from '../users/users.service';
 import { ERROR_MESSAGES, PREMIUM_LIMITS } from '../common/constants/premium.constants';
 import { PremiumLimitException } from '../common/exceptions/premium-limit.exception';
 import { GroupsRepository } from './groups.repository';
+import { GroupPlanService } from './group-plan.service';
 import { UpdateNotificationsDto, UpdateOptionsDto } from './dto';
 import { GroupNotificationPrefs, resolveNotificationPrefs } from '../common/notification-prefs';
 import { isCatalogEmoji } from '../emoji/emoji';
@@ -28,6 +29,7 @@ export class GroupsService {
     private readonly usersService: UsersService,
     private readonly sessionService: SessionService,
     private readonly notificationsService: NotificationsService,
+    private readonly groupPlanService: GroupPlanService,
   ) {}
 
   async createGroup(userId: string, name: string) {
@@ -39,8 +41,9 @@ export class GroupsService {
   }
 
   async joinGroup(userId: string, inviteCode: string) {
-    const group = await this.groupsRepository.findByInviteCode(inviteCode);
-    if (!group) throw new NotFoundException('Grup bulunamadı');
+    const found = await this.groupsRepository.findByInviteCode(inviteCode);
+    if (!found) throw new NotFoundException('Grup bulunamadı');
+    const group = await this.withOwnerPlan(found);
 
     const user = await this.usersService.findByIdOrThrow(userId);
 
@@ -108,8 +111,9 @@ export class GroupsService {
   // ---------------------------------------------------------------
 
   async requestToJoin(userId: string, groupId: string) {
-    const group = await this.groupsRepository.findById(groupId);
-    if (!group) throw new NotFoundException('Grup bulunamadı');
+    const found = await this.groupsRepository.findById(groupId);
+    if (!found) throw new NotFoundException('Grup bulunamadı');
+    const group = await this.withOwnerPlan(found);
 
     if (group.members[userId]) {
       throw new ConflictException('Zaten bu grubun üyesisiniz');
@@ -147,7 +151,7 @@ export class GroupsService {
     requestId: string,
     response: 'APPROVED' | 'REJECTED',
   ) {
-    const group = await this.assertAdmin(groupId, userId);
+    const group = await this.withOwnerPlan(await this.assertAdmin(groupId, userId));
 
     const request = await this.groupsRepository.findJoinRequestById(groupId, requestId);
     if (!request) throw new NotFoundException('İstek bulunamadı');
@@ -212,11 +216,12 @@ export class GroupsService {
 
   /**
    * Grubun durum / ruh hali listelerini sahibin gönderdiği sırayla yazar.
-   * Yalnızca grup sahibi ve Premium. Varsayılanların metni değişmez; özel
-   * seçenekler eklenebilir/düzenlenebilir; listede olmayan silinmiş sayılır.
+   * Yalnızca grup sahibi ve Premium. Her liste toplam MAX_OPTIONS seçenek
+   * tutar; varsayılanlar dahil her seçenek düzenlenebilir, listede olmayan
+   * silinmiş sayılır.
    */
   async updateOptions(userId: string, groupId: string, dto: UpdateOptionsDto) {
-    const group = await this.assertAdmin(groupId, userId);
+    const group = await this.withOwnerPlan(await this.assertAdmin(groupId, userId));
     if (!group.ownerIsPremium) {
       throw new PremiumLimitException(
         'OPTIONS_PREMIUM',
@@ -347,6 +352,23 @@ export class GroupsService {
     }
   }
 
+  /**
+   * Gruptaki ownerIsPremium yalnızca sahibin users.isPremium'unun kopyasıdır.
+   * Kopya kaymışsa (webhook kaçtı, kayıt elle düzeltildi) kural uygulanmadan
+   * önce sahibin gerçek durumuna hizalanır — "drawer'da premium, grupta değil"
+   * durumu oluşamaz.
+   */
+  private async withOwnerPlan(group: GroupRecord): Promise<GroupRecord> {
+    const owner = await this.usersService.findById(group.ownerId);
+    if (!owner) return group;
+    const drifted =
+      owner.isPremium !== group.ownerIsPremium || (owner.isPremium && group.isPaused);
+    if (!drifted) return group;
+
+    await this.groupPlanService.applyOwnerPremium(owner.id, owner.isPremium);
+    return (await this.groupsRepository.findById(group.id)) ?? group;
+  }
+
   private async assertAdmin(groupId: string, userId: string): Promise<GroupRecord> {
     const group = await this.groupsRepository.findById(groupId);
     if (!group) throw new NotFoundException('Grup bulunamadı');
@@ -359,10 +381,12 @@ export class GroupsService {
 
 /**
  * Gönderilen listeyi mevcut + varsayılan seçeneklere göre çözümler.
- * Varsayılanlar metin/emoji değiştiremez; bilinmeyen id yeni özel seçenektir.
+ * Var olan seçenek (varsayılan dahil) id'si ve mood key'i korunarak
+ * düzenlenir — üyelerin mevcut durum kayıtları kopmaz. Düzenlenen varsayılan
+ * artık "varsayılan" sayılmaz. Bilinmeyen id yeni seçenektir.
  */
-function resolveOptions(
-  input: { id?: string; text: string; emoji?: string }[],
+export function resolveOptions(
+  input: { id?: string; text: string; emoji?: string; notifies?: boolean }[],
   current: GroupOption[],
   defaults: GroupOption[],
   kind: 'status' | 'mood',
@@ -384,17 +408,27 @@ function resolveOptions(
       throw new BadRequestException(`"${text}" için seçilen emoji desteklenmiyor`);
     }
 
+    const emoji = item.emoji || undefined;
     let option: GroupOption;
-    if (existing?.isDefault) {
-      option = { ...existing };
-    } else if (existing) {
-      option = { ...existing, text, emoji: item.emoji || undefined };
+    if (existing) {
+      const changed = existing.text !== text || (existing.emoji || undefined) !== emoji;
+      option = {
+        ...existing,
+        text,
+        emoji,
+        isDefault: existing.isDefault && !changed,
+      };
     } else {
       const id = newOptionId(kind);
-      option = { id, text, emoji: item.emoji || undefined, isDefault: false };
+      option = { id, text, emoji, isDefault: false };
       if (kind === 'mood') {
         (option as GroupMoodOption).key = `${slugify(text)}_${id.slice(-4)}`;
       }
+    }
+    if (kind === 'status') {
+      option.notifies = item.notifies ?? existing?.notifies ?? true;
+    } else {
+      delete option.notifies;
     }
 
     const textKey = option.text.toLocaleLowerCase('tr-TR');
@@ -406,12 +440,11 @@ function resolveOptions(
     result.push(option);
   }
 
-  const customCount = result.filter((o) => !o.isDefault).length;
-  if (customCount > MAX_CUSTOM_OPTIONS) {
+  if (result.length > MAX_OPTIONS) {
     throw new PremiumLimitException(
       'OPTIONS_LIMIT',
-      ERROR_MESSAGES.PREMIUM.MAX_CUSTOM_OPTIONS(MAX_CUSTOM_OPTIONS),
-      { limit: MAX_CUSTOM_OPTIONS },
+      ERROR_MESSAGES.PREMIUM.MAX_OPTIONS(MAX_OPTIONS),
+      { limit: MAX_OPTIONS },
     );
   }
   return result;

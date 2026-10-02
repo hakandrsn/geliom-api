@@ -3,6 +3,7 @@ import {
   ArrayMaxSize,
   ArrayMinSize,
   IsArray,
+  IsBoolean,
   IsNotEmpty,
   IsOptional,
   IsString,
@@ -32,6 +33,11 @@ export class OptionInputDto {
   @IsString()
   @MaxLength(16)
   emoji?: string;
+
+  @ApiPropertyOptional({ description: 'Yalnızca durum: bu duruma geçince bildirim gitsin mi', default: true })
+  @IsOptional()
+  @IsBoolean()
+  notifies?: boolean;
 }
 
 /**

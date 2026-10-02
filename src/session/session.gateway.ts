@@ -11,7 +11,7 @@ import {
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
 import * as admin from 'firebase-admin';
-import { nowIso, StatusEntry } from '../firebase/firestore.types';
+import { GroupOption, nowIso, StatusEntry } from '../firebase/firestore.types';
 import { PushDebounceService } from '../notifications/push-debounce.service';
 import { StatusChangeFlags } from '../common/notification-prefs';
 import { validateStatusPayload } from './dto/update-status.dto';
@@ -141,7 +141,8 @@ export class SessionGateway implements OnGatewayInit, OnGatewayConnection, OnGat
     try {
       await this.sessionService.mutateGroup(groupId, (group) => {
         const prev = group.statuses[userId];
-        flags.status = prev?.text !== entry.text;
+        // "Bildirim gönder" kapalı bir duruma geçiş push tetiklemez
+        flags.status = prev?.text !== entry.text && statusNotifies(group.statusOptions, entry.text);
         flags.mood = prev?.mood !== entry.mood || prev?.emoji !== entry.emoji;
         group.statuses[userId] = entry;
         return {
@@ -198,4 +199,12 @@ export class SessionGateway implements OnGatewayInit, OnGatewayConnection, OnGat
     rate.count += 1;
     return rate.count <= STATUS_RATE_LIMIT;
   }
+}
+
+/** Durum metni listedeki bir seçeneğe denk geliyorsa onun notifies ayarı; yoksa true. */
+function statusNotifies(options: GroupOption[] | undefined, text: string | undefined): boolean {
+  if (!text) return true;
+  const key = text.toLocaleLowerCase('tr-TR');
+  const option = options?.find((o) => o.text.toLocaleLowerCase('tr-TR') === key);
+  return option?.notifies !== false;
 }

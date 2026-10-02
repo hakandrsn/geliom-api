@@ -27,7 +27,7 @@ export const ERROR_MESSAGES = {
       `Bu kullanıcı grup limitine ulaşmış (${max}). Onaylanabilmesi için önce bir gruptan ayrılması ya da Premium'a geçmesi gerekir.`,
     CUSTOM_MOOD_RESTRICTED: 'Özel mood eklemek Premium özelliğidir.',
     OPTIONS_RESTRICTED: 'Grubun durum ve ruh hali listesini düzenlemek Premium özelliğidir.',
-    MAX_CUSTOM_OPTIONS: (max: number) => `Bir listeye en fazla ${max} özel seçenek eklenebilir.`,
+    MAX_OPTIONS: (max: number) => `Bir listede en fazla ${max} seçenek olabilir.`,
     GROUP_PAUSED: 'Bu grup duraklatıldı. Grup liderinin aboneliğini yenilemesi bekleniyor.',
     MAX_CUSTOM_MOODS_REACHED: (max: number) =>
       `Bu grup için maksimum özel mood limitine (${max}) ulaşıldı.`,

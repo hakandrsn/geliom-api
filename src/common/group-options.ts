@@ -1,8 +1,8 @@
 import { randomUUID } from 'crypto';
 import { GroupDoc, GroupMoodOption, GroupOption } from '../firebase/firestore.types';
 
-/** Bir listede en fazla bu kadar ÖZEL (varsayılan olmayan) seçenek olabilir. */
-export const MAX_CUSTOM_OPTIONS = 10;
+/** Bir listede (durum ya da ruh hali) toplam en fazla bu kadar seçenek olabilir. */
+export const MAX_OPTIONS = 10;
 export const OPTION_TEXT_MAX = 40;
 
 export const DEFAULT_STATUS_OPTIONS: GroupOption[] = [
