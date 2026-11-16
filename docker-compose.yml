@@ -1,7 +1,5 @@
-# Docker Compose for local development
+# Production Compose; dis erisim yalniz ortak Caddy uzerinden.
 # Veritabanı Firestore olduğu için sadece API servisi
-
-version: '3.8'
 
 services:
   # =============================================
@@ -13,8 +11,6 @@ services:
       dockerfile: Dockerfile
     container_name: geliom-api
     restart: unless-stopped
-    ports:
-      - '3045:3045'
     env_file:
       - .env
     environment:
@@ -23,7 +19,7 @@ services:
       FIREBASE_SERVICE_ACCOUNT_PATH: /app/firebase-service-account.json
     volumes:
       - ./geliom-8d06f-firebase-adminsdk-fbsvc-00dc3c2155.json:/app/firebase-service-account.json:ro
-    networks: [ae-network]
+    networks: [geliom-network]
     healthcheck:
       test: ['CMD', 'wget', '--no-verbose', '--tries=1', '--spider', 'http://localhost:3045/api/auth/health']
       interval: 30s
@@ -32,5 +28,6 @@ services:
 
 
 networks:
-  ae-network:
-    external: true
+  geliom-network:
+    name: geliom-network
+    driver: bridge
